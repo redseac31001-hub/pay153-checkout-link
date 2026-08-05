@@ -40,6 +40,54 @@ STRIPE_CHECKOUT_FRAGMENT = (
     "z8ndmxrYmlgWmxxYGgnKSdga2RnaWBVaWRmYG1qaWFgd3YnP3F3cGB4JSUl"
 )
 
+_STRIPE_CHECKOUT_SESSION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])cs_(?:live|test)_[A-Za-z0-9]+(?![A-Za-z0-9_])"
+)
+
+
+def is_stripe_checkout_session_id(value: Any) -> bool:
+    return bool(_STRIPE_CHECKOUT_SESSION_RE.fullmatch(str(value or "").strip()))
+
+
+def extract_stripe_checkout_session_id(payload: Any, raw_text: str = "") -> str:
+    """Find the Stripe payment_page ID in an OpenAI Checkout response.
+
+    Recent Checkout responses can expose an ``oaics_*`` OpenAI session ID in
+    the top-level ``checkout_session_id`` field while the Stripe
+    ``cs_live_*`` ID is nested or only present in a URL.  Stripe's
+    ``/v1/payment_pages/<id>/init`` accepts only the latter.
+    """
+
+    def visit(value: Any) -> str:
+        if isinstance(value, str):
+            match = _STRIPE_CHECKOUT_SESSION_RE.search(value)
+            return match.group(0) if match else ""
+        if isinstance(value, dict):
+            preferred_keys = (
+                "stripe_checkout_session_id",
+                "payment_page_id",
+                "checkout_session_id",
+                "checkout_url",
+                "url",
+            )
+            for key in preferred_keys:
+                if key in value:
+                    found = visit(value[key])
+                    if found:
+                        return found
+            for item in value.values():
+                found = visit(item)
+                if found:
+                    return found
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                found = visit(item)
+                if found:
+                    return found
+        return ""
+
+    return visit(payload) or visit(raw_text)
+
 PLANS = {
     "plus": "chatgptplusplan",
     "pro": "chatgptpro",
@@ -428,14 +476,20 @@ def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: 
         data = resp.json()
     except Exception:
         raise RuntimeError(f"OpenAI Checkout 返回非 JSON：{text[:300]}")
-    sid = data.get("checkout_session_id") or ""
+    raw_session_id = str(data.get("checkout_session_id") or "").strip()
     url = data.get("url") or ""
-    if not sid and url:
-        match = re.search(r"cs_(?:live|test)_[A-Za-z0-9]+", url)
-        sid = match.group(0) if match else ""
+    sid = extract_stripe_checkout_session_id(data, text)
+    if raw_session_id and raw_session_id != sid:
+        data["openai_checkout_session_id"] = raw_session_id
+        if sid:
+            log(
+                f"[checkout] 使用 Stripe Session {sid[:32]}，忽略 OpenAI 内部 Session "
+                f"{raw_session_id[:32]}"
+            )
+    # Keep an oaics_* ID available for /checkout/update materialization.  It
+    # must never be sent to Stripe's /payment_pages/<id>/init directly.
     if not sid:
-        match = re.search(r"cs_(?:live|test)_[A-Za-z0-9]+", text)
-        sid = match.group(0) if match else ""
+        sid = raw_session_id
     data["checkout_session_id"] = sid
     data["checkout_url"] = url or (f"https://pay.openai.com/c/pay/{sid}{STRIPE_CHECKOUT_FRAGMENT}" if sid else "")
     return {"data": data, "http": http}
@@ -1211,6 +1265,60 @@ class JobStore:
                 else:
                     self.log(job_id, "iDEAL 优惠更新使用代理池 1，NL/EUR Checkout 与 Stripe 使用代理池 2")
             session_id = checkout_data.get("checkout_session_id") or ""
+            if session_id and not is_stripe_checkout_session_id(session_id):
+                # Some newer OpenAI Checkout responses expose an oaics_* ID
+                # before the Stripe custom checkout is materialized.  The
+                # promo/update response contains the real cs_live_* payment
+                # page ID, so materialize it before any Stripe /init call.
+                if not promo_requested:
+                    raise RuntimeError(
+                        f"Checkout 返回非 Stripe Session ID: {str(session_id)[:80]}"
+                    )
+                processor_entity = str(
+                    checkout_data.get("processor_entity")
+                    or checkout_data.get("processor")
+                    or ""
+                ).strip()
+                if not processor_entity:
+                    processor_entity = sc._entity_from_return_url(
+                        str(checkout_data.get("return_url") or checkout_data.get("url") or "")
+                    )
+                if not processor_entity:
+                    raise RuntimeError(
+                        "Checkout 返回 OpenAI 内部 Session，但缺少 processor_entity，无法换取 Stripe Session"
+                    )
+                openai_session_id = str(session_id)
+                self.log(
+                    job_id,
+                    f"Checkout 返回 OpenAI 内部 Session {openai_session_id[:32]}，先通过 checkout/update 获取 Stripe Session",
+                )
+                materialized = update_checkout_promo(
+                    promo_chatgpt_http,
+                    token,
+                    openai_session_id,
+                    processor_entity,
+                    options.get("promo_campaign") or "plus-1-month-free",
+                    lambda m: self.log(job_id, m),
+                    device_id=device_id,
+                )
+                resolved_session_id = extract_stripe_checkout_session_id(materialized)
+                if not resolved_session_id:
+                    raise RuntimeError(
+                        "checkout/update 未返回 Stripe cs_live_/cs_test_ Session ID，无法初始化 payment_page"
+                    )
+                checkout_data["openai_checkout_session_id"] = openai_session_id
+                session_id = resolved_session_id
+                checkout_data["checkout_session_id"] = session_id
+                nested_session = materialized.get("checkout_session")
+                if isinstance(nested_session, dict):
+                    for key in ("publishable_key", "processor_entity", "return_url", "url"):
+                        if nested_session.get(key):
+                            checkout_data[key] = nested_session[key]
+                options["promo_preapplied"] = True
+                self.log(
+                    job_id,
+                    f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
+                )
             if not session_id and provider != "hosted":
                 raise RuntimeError("Checkout 未返回 Stripe Session ID")
             if self.cancelled(job_id):
@@ -1492,7 +1600,13 @@ class JobStore:
                 # 卡住时，额外 Sentinel 上下文会让批准结果与 Stripe
                 # submission 不同步。
                 approve_callback=None if provider == "paypal" else approve_cb,
-                apply_promo_callback=apply_promo_cb if provider in {"pix", "paypal", "upi", "ideal"} and promo_requested else None,
+                apply_promo_callback=(
+                    apply_promo_cb
+                    if provider in {"pix", "paypal", "upi", "ideal"}
+                    and promo_requested
+                    and not options.get("promo_preapplied")
+                    else None
+                ),
                 ideal_bank=options.get("ideal_bank", ""),
                 require_zero_due=promo_requested,
                 local_method_strategy=options.get("local_method_strategy") or "standalone",
