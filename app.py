@@ -115,9 +115,14 @@ class ProxySentinel(BaseSentinel):
 
     async def _get_session(self):
         if not self._session:
-            kwargs: dict[str, Any] = {"impersonate": "chrome", "timeout": 70}
+            kwargs: dict[str, Any] = {
+                "impersonate": "chrome",
+                "timeout": 70,
+                "trust_env": False,
+            }
             if self.proxy:
                 kwargs["proxies"] = {"http": self.proxy, "https": self.proxy}
+                kwargs["curl_options"] = sc.proxy_curl_options()
             self._session = requests.AsyncSession(**kwargs)
         return self._session
 
@@ -545,13 +550,17 @@ _PROXY_GEO_CACHE_LOCK = threading.Lock()
 
 def proxy_geo_cached(proxy: str, ttl: int = 900) -> dict[str, str]:
     now = time.time()
+    # The same pool entry can expose a different exit when the local gateway
+    # changes.  Include the first hop in the cache key so a runtime config
+    # change cannot reuse a direct/old-chain result.
+    cache_key = f"{sc.proxy_pre_proxy() or ''}\x00{proxy}"
     with _PROXY_GEO_CACHE_LOCK:
-        cached = _PROXY_GEO_CACHE.get(proxy)
+        cached = _PROXY_GEO_CACHE.get(cache_key)
         if cached and now - cached[0] <= ttl:
             return dict(cached[1])
     data = proxy_geo(proxy)
     with _PROXY_GEO_CACHE_LOCK:
-        _PROXY_GEO_CACHE[proxy] = (now, dict(data))
+        _PROXY_GEO_CACHE[cache_key] = (now, dict(data))
     return data
 
 
@@ -1042,6 +1051,12 @@ class JobStore:
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，本次已自动选择 1 条")
             else:
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，代理池 2 共 {len(exit_pool)} 条，本次已分别自动选择")
+            self.log(
+                job_id,
+                "代理链：本地第一跳已启用（PAY153_PROXY_PRE_PROXY），代理池条目作为最终出口"
+                if sc.proxy_pre_proxy()
+                else "代理链：未启用本地第一跳，代理池直接连接",
+            )
             # Every outer retry creates a brand-new Checkout, so it must also
             # use a fresh browser/device identity.  Within this single attempt
             # the same ids are kept for create -> update -> approve.
@@ -1573,7 +1588,12 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "pay153", "time": int(time.time())})
+    return jsonify({
+        "ok": True,
+        "service": "pay153",
+        "time": int(time.time()),
+        "proxy_pre_proxy_enabled": bool(sc.proxy_pre_proxy()),
+    })
 
 
 @app.get("/api/config")

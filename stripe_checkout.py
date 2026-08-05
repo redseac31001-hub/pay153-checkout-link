@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import random
 import re
@@ -23,6 +24,8 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+
+from curl_cffi.const import CurlOpt
 
 STRIPE_API = "https://api.stripe.com"
 STRIPE_VERSION_BASE = "2025-03-31.basil"
@@ -35,6 +38,42 @@ PAYPAL_STRIPE_VERSION = (
     "2020-08-27;custom_checkout_beta=v1; "
     "checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 )
+
+# The proxy pool is the exit hop.  The local proxy is used as curl's
+# CURLOPT_PRE_PROXY so every connection to a pool proxy is established
+# through it first.  This is different from setting the local proxy as the
+# normal proxy: the latter would discard the selected pool exit proxy.
+PROXY_PRE_PROXY_ENV = "PAY153_PROXY_PRE_PROXY"
+DEFAULT_PROXY_PRE_PROXY = "http://127.0.0.1:9697"
+_DISABLED_PROXY_VALUES = {"0", "false", "off", "none", "direct", "disable", "disabled"}
+
+
+def proxy_pre_proxy() -> str | None:
+    """Return the first-hop proxy for all configured proxy-pool exits.
+
+    The default intentionally points at the local gateway requested by the
+    application deployment.  Set ``PAY153_PROXY_PRE_PROXY`` to an empty value
+    or one of the disabled values to use the pool proxy directly.
+    """
+    value = os.getenv(PROXY_PRE_PROXY_ENV, DEFAULT_PROXY_PRE_PROXY).strip()
+    if not value or value.casefold() in _DISABLED_PROXY_VALUES:
+        return None
+    if "://" not in value:
+        value = f"http://{value}"
+    return value
+
+
+def proxy_curl_options() -> dict:
+    """Build curl options for the local first-hop proxy.
+
+    curl's PRE_PROXY option supports HTTP and SOCKS pre-proxies and keeps the
+    pool entry as the real proxy/exit hop.  Keeping this in one helper makes
+    sync and async requests use exactly the same chain.
+    """
+    pre_proxy = proxy_pre_proxy()
+    if not pre_proxy:
+        return {}
+    return {CurlOpt.PRE_PROXY: pre_proxy}
 
 
 def _load_paypal_fingerprint() -> dict:
@@ -176,10 +215,19 @@ def _extract_payment_method_types(payload: dict) -> list[str]:
 
 
 def build_http(proxy: Optional[str]):
-    """curl_cffi Session（chrome136 TLS 指纹），跟随支付代理。"""
+    """Create a curl_cffi session using the pool proxy via the local gateway.
+
+    ``proxy`` remains the selected pool entry (the exit hop).  When a pool
+    entry is present, ``PAY153_PROXY_PRE_PROXY``/the local default is applied
+    as curl's pre-proxy, so the TCP connection to that entry also goes through
+    the local gateway.
+    """
     from curl_cffi.requests import Session as CffiSession
 
-    http = CffiSession(impersonate="chrome136")
+    http = CffiSession(
+        impersonate="chrome136",
+        curl_options=proxy_curl_options() if proxy else {},
+    )
     try:
         http.trust_env = False
     except Exception:

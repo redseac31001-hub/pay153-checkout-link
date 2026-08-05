@@ -59,6 +59,9 @@ pay153-checkout-link/
 ├─ sentinel_token.py            # Sentinel Token 生成与请求封装
 ├─ sentinel_sdk_full.js         # Sentinel SDK/VM 辅助代码
 ├─ gen_token_jsdom.js           # Node/JSDOM Token 辅助脚本
+├─ package.json                 # Sentinel Node 运行依赖
+├─ package-lock.json
+├─ start-pay153.cmd             # Windows 启动/重启/停止脚本
 ├─ static/
 │  ├─ index.html                # 提链控制台
 │  ├─ app.js                    # 前端任务与交互逻辑
@@ -78,8 +81,17 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+npm install
 
 python app.py
+```
+
+Windows 可使用项目自带脚本启动；`start` 和 `restart` 会先清理占用 `18082` 端口的旧进程：
+
+```bat
+start-pay153.cmd start
+start-pay153.cmd restart
+start-pay153.cmd stop
 ```
 
 生产环境推荐使用 Gunicorn：
@@ -106,6 +118,7 @@ cp .env.example .env
 | `PAY153_IP_RPM` | 单 IP 每分钟任务上限 |
 | `PAY153_LOG_DIR` | 完整后台日志目录 |
 | `PAY153_LEGACY_BASE` | 旧服务兼容地址，可选 |
+| `PAY153_PROXY_PRE_PROXY` | 代理池第一跳，默认 `http://127.0.0.1:9697`；留空可关闭 |
 
 ## 代理池
 
@@ -119,6 +132,8 @@ socks5://username:password@host:port
 ```
 
 任务提交后会根据支付路径和地区选择代理；代理凭据仅应通过网页或环境变量传入。
+
+代理池采用两跳链路：本地 `PAY153_PROXY_PRE_PROXY` 是第一跳，代理池中的每条代理是最终出口。程序通过 curl 的 `PRE_PROXY` 建立到代理池节点的连接，因此不会把本地 9697 误当成地区出口。9697 必须允许 CONNECT 到代理池节点；如果本地代理服务不可用，所有代理池检测都会失败。设置 `PAY153_PROXY_PRE_PROXY=` 可恢复代理池直连。
 
 ## 生产部署
 

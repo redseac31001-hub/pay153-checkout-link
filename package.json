@@ -1,0 +1,7 @@
+{
+  "name": "pay153-checkout-link",
+  "private": true,
+  "dependencies": {
+    "jsdom": "26.1.0"
+  }
+}
