@@ -119,6 +119,7 @@ cp .env.example .env
 | `PAY153_LOG_DIR` | 完整后台日志目录 |
 | `PAY153_LEGACY_BASE` | 旧服务兼容地址，可选 |
 | `PAY153_PROXY_PRE_PROXY` | 代理池第一跳，默认 `http://127.0.0.1:9697`；留空可关闭 |
+| `PAYPAL_APPROVE_POLL_ATTEMPTS` | PayPal 审批后等待跳转地址的轮询次数，默认 6，范围 1-12 |
 
 ## 代理池
 

@@ -959,9 +959,19 @@ def approve_submission(chatgpt_http, access_token: str, session_id: str, process
     return payload
 
 
+def paypal_approve_poll_attempts() -> int:
+    """Return the bounded number of redirect polls after PayPal approval."""
+    try:
+        value = int(os.getenv("PAYPAL_APPROVE_POLL_ATTEMPTS", "6") or 6)
+    except (TypeError, ValueError):
+        value = 6
+    return max(1, min(12, value))
+
+
 def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dict | None = None, max_attempts: int = 15) -> str:
     """approve 后 GET /payment_pages/<id> 轮询，拿 next_action.redirect_to_url。"""
     ctx = ctx or {}
+    max_attempts = max(1, int(max_attempts))
     params = {
         "key": pk,
         "_stripe_version": STRIPE_VERSION_FULL,
@@ -979,16 +989,22 @@ def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dic
         try:
             gr = http.get(f"{STRIPE_API}/v1/payment_pages/{session_id}", params=params, headers=_stripe_headers(), timeout=20)
         except Exception as e:
-            log(f"[stripe] approve 后 GET 异常: {e}")
-            time.sleep(1)
+            log(f"[stripe] approve 后 poll {i + 1}/{max_attempts} GET 异常: {type(e).__name__}")
+            if i + 1 < max_attempts:
+                time.sleep(1)
             continue
-        if getattr(gr, "status_code", 0) != 200:
-            time.sleep(1)
+        status_code = getattr(gr, "status_code", 0)
+        if status_code != 200:
+            log(f"[stripe] approve 后 poll {i + 1}/{max_attempts}: HTTP {status_code}")
+            if i + 1 < max_attempts:
+                time.sleep(1)
             continue
         try:
             gj = gr.json()
         except Exception:
-            time.sleep(1)
+            log(f"[stripe] approve 后 poll {i + 1}/{max_attempts}: JSON 解析失败")
+            if i + 1 < max_attempts:
+                time.sleep(1)
             continue
         url = extract_redirect_url(gj)
         if url:
@@ -998,13 +1014,14 @@ def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dic
         setup_intent = gj.get("setup_intent") or {}
         decline = payment_intent.get("last_payment_error") or setup_intent.get("last_setup_error") or {}
         log(
-            f"[stripe] approve 后 poll {i + 1}: sub_state={sa} "
+            f"[stripe] approve 后 poll {i + 1}/{max_attempts}: sub_state={sa} "
             f"payment_status={payment_intent.get('status') or ''} "
             f"setup_status={setup_intent.get('status') or ''} "
             f"decline_code={decline.get('decline_code') or decline.get('code') or ''} "
             f"decline_message={decline.get('message') or ''}"
         )
-        time.sleep(1)
+        if i + 1 < max_attempts:
+            time.sleep(1)
     return ""
 
 
@@ -1217,7 +1234,7 @@ def stripe_to_paypal_redirect(
     )
     if promotion_billing:
         log(
-            "[paypal] BR 优惠已由 checkout/update 应用；merchant 快照与 "
+            "[paypal] 优惠已由 checkout/update 应用；merchant 快照与 "
             f"Stripe/PayPal 账单统一为 {(billing.get('address') or {}).get('country') or country}"
         )
 
@@ -1274,14 +1291,16 @@ def stripe_to_paypal_redirect(
                 approve_callback(pe)
             else:
                 approve_submission(chatgpt_http, access_token, session_id, pe, log)
-            # 再次 confirm 会新建 submission 并重新回到 requires_approval。
-            # 用户侧实测首个 poll 未命中后继续等待也不会转好，因此只读取一次，
-            # 未命中就交给外层重建完整 Checkout。
+            # 不再次 confirm，避免创建重复 submission；只轮询同一个已批准
+            # submission，给 Stripe 异步生成 PayPal 跳转地址留出时间。
+            poll_attempts = paypal_approve_poll_attempts()
             redirect_url = poll_redirect_after_approve(
-                payment_http, pk, session_id, log, ctx=ctx, max_attempts=1,
+                payment_http, pk, session_id, log, ctx=ctx, max_attempts=poll_attempts,
             )
             if not redirect_url:
-                raise RuntimeError("PayPal 首次 poll 未命中，正在更换代理重新尝试")
+                raise RuntimeError(
+                    f"PayPal approve 已成功，但轮询 {poll_attempts} 次仍未返回跳转地址，正在更换代理重新尝试"
+                )
 
     if not redirect_url:
         try:

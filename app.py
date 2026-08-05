@@ -966,11 +966,11 @@ class JobStore:
             current["fixed_entry_proxy"], current["fixed_exit_proxy"] = pair
             if current.get("link_type") == "paypal":
                 current["force_paypal_de_fallback"] = paypal_force_de_fallback
-                # Strategy A creates the Checkout with the campaign already
-                # attached.  This preserves the merchant's native zero-due
-                # PayPal SetupIntent configuration.  Strategy B keeps the
-                # existing cross-entry checkout/update flow as a fallback.
-                current["promo_on_create"] = bool((attempt - 1) % 2 == 0)
+                # A zero-due Checkout created with the campaign attached can
+                # remove PayPal from Stripe's available payment methods. Keep
+                # PayPal in the initial Checkout, then apply the campaign via
+                # checkout/update and verify that Stripe reaches amount=0.
+                current["promo_on_create"] = False
             if current.get("link_type") in {"pix", "upi"}:
                 # Alternate both Stripe submission shapes across outer retries.
                 # Some Checkout revisions accept a pre-created pm_* while
