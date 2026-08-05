@@ -44,6 +44,14 @@ _STRIPE_CHECKOUT_SESSION_RE = re.compile(
     r"(?<![A-Za-z0-9_])cs_(?:live|test)_[A-Za-z0-9]+(?![A-Za-z0-9_])"
 )
 
+CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
+
+
+class CheckoutSessionContractError(RuntimeError):
+    """Raised when OpenAI returns a session shape this Stripe adapter cannot use."""
+
+    error_code = CHECKOUT_SESSION_CONTRACT_ERROR_CODE
+
 
 def is_stripe_checkout_session_id(value: Any) -> bool:
     return bool(_STRIPE_CHECKOUT_SESSION_RE.fullmatch(str(value or "").strip()))
@@ -87,6 +95,99 @@ def extract_stripe_checkout_session_id(payload: Any, raw_text: str = "") -> str:
         return ""
 
     return visit(payload) or visit(raw_text)
+
+
+def _checkout_field_value_kind(key: str, value: Any) -> str:
+    """Return a small, non-sensitive description for a checkout response field."""
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return "<object>"
+    if isinstance(value, (list, tuple)):
+        return f"<array:{len(value)}>"
+    text = str(value).strip()
+    if not text:
+        return "<empty>"
+    lowered_key = str(key).lower()
+    if "url" in lowered_key:
+        return "<url>"
+    if "secret" in lowered_key or "publishable" in lowered_key or lowered_key in {"key", "token"}:
+        return "<redacted>"
+    for pattern, label in (
+        (r"oaics_[A-Za-z0-9]+", "oaics_*"),
+        (r"cs_live_[A-Za-z0-9]+", "cs_live_*"),
+        (r"cs_test_[A-Za-z0-9]+", "cs_test_*"),
+        (r"pm_[A-Za-z0-9]+", "pm_*"),
+        (r"pi_[A-Za-z0-9]+", "pi_*"),
+        (r"seti_[A-Za-z0-9]+", "seti_*"),
+    ):
+        if re.search(pattern, text):
+            return label
+    if "id" in lowered_key or "session" in lowered_key:
+        return f"<string:{len(text)}>"
+    return f"<string:{len(text)}>"
+
+
+def summarize_checkout_response(payload: Any) -> str:
+    """Summarize checkout response shape without logging IDs, keys, or URLs.
+
+    The create/update endpoints are private and their response schema can
+    change independently of Stripe.  Logging only field names and value kinds
+    makes that change diagnosable without persisting payment credentials or
+    session material.
+    """
+    if not isinstance(payload, dict):
+        return f"type={type(payload).__name__}"
+
+    root_keys = [str(key) for key in payload.keys()]
+    checkout_session_keys: list[str] = []
+    interesting: list[str] = []
+    seen_paths: set[str] = set()
+
+    def walk(value: Any, path: str = "", depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            if path.rsplit(".", 1)[-1] == "checkout_session":
+                checkout_session_keys.extend(str(key) for key in value.keys())
+            for key, item in value.items():
+                key_text = str(key)
+                item_path = f"{path}.{key_text}" if path else key_text
+                lowered = key_text.lower()
+                if (
+                    "id" in lowered
+                    or "url" in lowered
+                    or "session" in lowered
+                    or "payment" in lowered
+                    or "secret" in lowered
+                    or "publishable" in lowered
+                    or lowered in {"processor", "processor_entity", "tag"}
+                ) and item_path not in seen_paths:
+                    seen_paths.add(item_path)
+                    interesting.append(
+                        f"{item_path}={_checkout_field_value_kind(key_text, item)}"
+                    )
+                walk(item, item_path, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value[:20]):
+                walk(item, f"{path}[{index}]", depth + 1)
+
+    walk(payload)
+    root = ",".join(root_keys[:40]) or "-"
+    nested = ",".join(dict.fromkeys(checkout_session_keys)) or "-"
+    fields = "; ".join(interesting[:60]) or "-"
+    return f"root_keys=[{root}]; checkout_session_keys=[{nested}]; fields=[{fields}]"
+
+
+def checkout_session_contract_error(payload: Any, source: str) -> CheckoutSessionContractError:
+    """Build the actionable error used when no Stripe payment_page ID exists."""
+    source_text = source.strip() or "Checkout"
+    return CheckoutSessionContractError(
+        f"{source_text} 当前只返回 OpenAI 内部 Session（oaics_*），未返回 "
+        "Stripe payment_page 所需的 cs_live_/cs_test_ Session ID；"
+        "当前旧 Stripe 初始化链路无法继续。"
+        f"响应结构：{summarize_checkout_response(payload)}"
+    )
 
 PLANS = {
     "plus": "chatgptplusplan",
@@ -476,6 +577,7 @@ def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: 
         data = resp.json()
     except Exception:
         raise RuntimeError(f"OpenAI Checkout 返回非 JSON：{text[:300]}")
+    log(f"[checkout] response schema: {summarize_checkout_response(data)}")
     raw_session_id = str(data.get("checkout_session_id") or "").strip()
     url = data.get("url") or ""
     sid = extract_stripe_checkout_session_id(data, text)
@@ -700,13 +802,17 @@ def update_checkout_promo(
         timeout=45,
     )
     text = resp.text or ""
-    log(f"[promo] checkout/update: {resp.status_code} {text[:180]}")
+    try:
+        payload = resp.json() or {}
+    except Exception:
+        payload = {}
+    log(
+        f"[promo] checkout/update: {resp.status_code}; "
+        f"schema={summarize_checkout_response(payload)}"
+    )
     if resp.status_code != 200:
         raise RuntimeError(f"应用 Plus 优惠失败：HTTP {resp.status_code} {text[:300]}")
-    try:
-        return resp.json() or {}
-    except Exception:
-        return {}
+    return payload
 
 
 def approve_checkout(
@@ -887,7 +993,7 @@ class JobStore:
                     self.jobs.pop(key, None)
             self.jobs[job_id] = {
                 "id": job_id, "status": "queued", "percent": 2, "text": "任务已创建",
-                "logs": [], "result": None, "error": "", "cancel": False,
+                "logs": [], "result": None, "error": "", "error_code": "", "cancel": False,
                 "created_at": now, "updated_at": now, "queue_position": 0, "dispatched": False,
             }
             self.pending.append((job_id, options))
@@ -1048,6 +1154,7 @@ class JobStore:
                 job_id, status="running", percent=4,
                 text=f"第 {attempt}/{max_attempts} 次尝试：正在准备任务",
                 error="",
+                error_code="",
             )
             self.log(job_id, f"========== 提链尝试 {attempt}/{max_attempts} ==========")
             if current.get("link_type") == "paypal" and current.get("use_promo"):
@@ -1065,7 +1172,8 @@ class JobStore:
                 return
             last_error = str(state.get("error") or "")
             lowered = last_error.lower()
-            non_retryable = any(marker in lowered for marker in (
+            error_code = str(state.get("error_code") or "")
+            non_retryable = error_code == CHECKOUT_SESSION_CONTRACT_ERROR_CODE or any(marker in lowered for marker in (
                 "access token", "token_invalidated", "token_expired", "token_revoked", "jwt expired",
                 "计划类型", "提取方式", "任务已停止",
             ))
@@ -1266,14 +1374,12 @@ class JobStore:
                     self.log(job_id, "iDEAL 优惠更新使用代理池 1，NL/EUR Checkout 与 Stripe 使用代理池 2")
             session_id = checkout_data.get("checkout_session_id") or ""
             if session_id and not is_stripe_checkout_session_id(session_id):
-                # Some newer OpenAI Checkout responses expose an oaics_* ID
-                # before the Stripe custom checkout is materialized.  The
-                # promo/update response contains the real cs_live_* payment
-                # page ID, so materialize it before any Stripe /init call.
+                # Do not pass an oaics_* OpenAI-owned ID to Stripe's
+                # /v1/payment_pages/<id>/init.  A previous adapter revision
+                # assumed checkout/update would materialize a cs_live_* ID;
+                # current responses can keep returning oaics_* instead.
                 if not promo_requested:
-                    raise RuntimeError(
-                        f"Checkout 返回非 Stripe Session ID: {str(session_id)[:80]}"
-                    )
+                    raise checkout_session_contract_error(checkout_data, "Checkout")
                 processor_entity = str(
                     checkout_data.get("processor_entity")
                     or checkout_data.get("processor")
@@ -1303,9 +1409,7 @@ class JobStore:
                 )
                 resolved_session_id = extract_stripe_checkout_session_id(materialized)
                 if not resolved_session_id:
-                    raise RuntimeError(
-                        "checkout/update 未返回 Stripe cs_live_/cs_test_ Session ID，无法初始化 payment_page"
-                    )
+                    raise checkout_session_contract_error(materialized, "checkout/update")
                 checkout_data["openai_checkout_session_id"] = openai_session_id
                 session_id = resolved_session_id
                 checkout_data["checkout_session_id"] = session_id
@@ -1631,6 +1735,7 @@ class JobStore:
             raw_error = str(exc)
             error_text = raw_error
             lowered = raw_error.lower()
+            error_code = str(getattr(exc, "error_code", "") or "")
             if "token_invalidated" in lowered or "authentication token has been invalidated" in lowered:
                 error_text = "Access Token 已失效，请重新登录 ChatGPT 获取新的 Session JSON 或 AT。"
             elif "token_expired" in lowered or "jwt expired" in lowered:
@@ -1642,7 +1747,16 @@ class JobStore:
             elif "amount_too_small" in lowered:
                 error_text = "当前地区换算后的结账金额低于支付提供商下限，请提高 Codex 积分数量后重试。"
             self.log(job_id, f"错误：{type(exc).__name__}: {error_text}")
-            if options.get("retry_wrapper"):
+            if error_code == CHECKOUT_SESSION_CONTRACT_ERROR_CODE:
+                self.update(
+                    job_id,
+                    status="error",
+                    percent=100,
+                    text="Checkout 接口协议已变化，已停止重复重试",
+                    error=error_text[:1200],
+                    error_code=error_code,
+                )
+            elif options.get("retry_wrapper"):
                 self.update(job_id, status="running", percent=8, text="本次未成功，正在更换代理重试", error=error_text[:1200])
             else:
                 self.update(job_id, status="error", percent=100, text="任务失败", error=error_text[:1200])

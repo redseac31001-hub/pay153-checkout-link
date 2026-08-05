@@ -81,6 +81,30 @@ class CheckoutSessionIdTests(unittest.TestCase):
         self.assertEqual(result["data"]["checkout_session_id"], "cs_live_expected")
         self.assertEqual(result["data"]["openai_checkout_session_id"], "oaics_test_internal")
 
+    def test_checkout_response_summary_keeps_schema_but_redacts_values(self):
+        summary = app.summarize_checkout_response({
+            "checkout_session": {
+                "checkout_session_id": "oaics_sensitive_session",
+                "publishable_key": "pk_live_sensitive_key",
+                "url": "https://pay.openai.com/c/pay/oaics_sensitive_session",
+            },
+            "client_secret": "cs_secret_value",
+        })
+
+        self.assertIn("checkout_session.checkout_session_id=oaics_*", summary)
+        self.assertIn("checkout_session.publishable_key=<redacted>", summary)
+        self.assertIn("checkout_session.url=<url>", summary)
+        self.assertNotIn("oaics_sensitive_session", summary)
+        self.assertNotIn("pk_live_sensitive_key", summary)
+        self.assertNotIn("cs_secret_value", summary)
+
+    def test_oaics_contract_error_is_non_retryable(self):
+        error = app.CheckoutSessionContractError("test")
+        self.assertEqual(
+            error.error_code,
+            app.CHECKOUT_SESSION_CONTRACT_ERROR_CODE,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
