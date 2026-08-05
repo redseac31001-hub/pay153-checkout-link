@@ -197,7 +197,8 @@ $('logBox').addEventListener('scroll', () => {
 
 function showResult(result){
   $('resultPanel').hidden = false;
-  $('resultType').textContent = `${String(result.plan||'').toUpperCase()} · ${String(result.link_type||'').toUpperCase()}`;
+  const managedSuffix = result.checkout_flow === 'openai_managed' ? ' · OPENAI 官方托管' : '';
+  $('resultType').textContent = `${String(result.plan||'').toUpperCase()} · ${String(result.link_type||'').toUpperCase()}${managedSuffix}`;
   $('resultEmail').textContent = result.account_email || '—';
   $('resultRegion').textContent = `${result.country || '—'} / ${result.currency || '—'}`;
   $('resultPromo').textContent = !result.promo_requested ? '未请求' : result.promo_applied === true ? '已生效 · 今日应付 0' : result.promo_applied === false ? '未生效' : '打开结账页确认';
@@ -206,6 +207,7 @@ function showResult(result){
   $('resultValue').value = finalValue;
   const openUrl = result.provider_redirect_url || result.checkout_url || '';
   $('openResult').href = openUrl || '#';
+  $('openResult').textContent = result.checkout_flow === 'openai_managed' ? '打开官方结账页' : '打开链接';
   $('openResult').style.display = openUrl ? 'inline-flex' : 'none';
   const qr = result.qr_image_png || result.qr_image_svg || '';
   $('qrWrap').hidden = !qr;

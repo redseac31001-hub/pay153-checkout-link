@@ -31,6 +31,25 @@ class _Http:
         return _Response()
 
 
+class _OaicsResponse:
+    status_code = 200
+    text = '{"checkout_session_id":"oaics_test_internal","processor_entity":"openai_ie"}'
+
+    def json(self):
+        return {
+            "checkout_session_id": "oaics_test_internal",
+            "processor_entity": "openai_ie",
+        }
+
+
+class _OaicsHttp(_Http):
+    def get(self, *_args, **_kwargs):
+        return _OaicsResponse()
+
+    def post(self, *_args, **_kwargs):
+        return _OaicsResponse()
+
+
 class CheckoutSessionIdTests(unittest.TestCase):
     def test_stripe_id_wins_over_openai_id_in_url(self):
         payload = {
@@ -103,6 +122,28 @@ class CheckoutSessionIdTests(unittest.TestCase):
         self.assertEqual(
             error.error_code,
             app.CHECKOUT_SESSION_CONTRACT_ERROR_CODE,
+        )
+
+    def test_oaics_session_uses_openai_managed_checkout_url(self):
+        async def fake_sentinel(*_args, **_kwargs):
+            return {}
+
+        with patch.object(app.sc, "build_http", return_value=_OaicsHttp()), patch.object(
+            app, "sentinel_headers", side_effect=fake_sentinel
+        ):
+            result = app.create_checkout(
+                "token",
+                {},
+                "",
+                "device",
+                "did",
+                lambda _message: None,
+            )
+
+        self.assertEqual(result["data"]["checkout_session_id"], "oaics_test_internal")
+        self.assertEqual(
+            result["data"]["checkout_url"],
+            "https://chatgpt.com/checkout/openai_ie/oaics_test_internal",
         )
 
 

@@ -43,6 +43,7 @@ STRIPE_CHECKOUT_FRAGMENT = (
 _STRIPE_CHECKOUT_SESSION_RE = re.compile(
     r"(?<![A-Za-z0-9_])cs_(?:live|test)_[A-Za-z0-9]+(?![A-Za-z0-9_])"
 )
+_OPENAI_CHECKOUT_SESSION_RE = re.compile(r"oaics_[A-Za-z0-9_]+")
 
 CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
 
@@ -55,6 +56,58 @@ class CheckoutSessionContractError(RuntimeError):
 
 def is_stripe_checkout_session_id(value: Any) -> bool:
     return bool(_STRIPE_CHECKOUT_SESSION_RE.fullmatch(str(value or "").strip()))
+
+
+def is_openai_checkout_session_id(value: Any) -> bool:
+    return bool(_OPENAI_CHECKOUT_SESSION_RE.fullmatch(str(value or "").strip()))
+
+
+def openai_managed_checkout_url(
+    payload: Any,
+    session_id: str,
+    processor_entity: str = "",
+) -> str:
+    """Return the official ChatGPT route for an OpenAI-owned Checkout session."""
+    if not is_openai_checkout_session_id(session_id):
+        return ""
+
+    candidates: list[str] = []
+    if isinstance(payload, dict):
+        for key in ("url", "checkout_url"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+        nested = payload.get("checkout_session")
+        if isinstance(nested, dict):
+            for key in ("url", "checkout_url"):
+                value = str(nested.get(key) or "").strip()
+                if value:
+                    candidates.append(value)
+            processor_entity = str(
+                nested.get("processor_entity") or processor_entity or ""
+            ).strip()
+        processor_entity = str(
+            payload.get("processor_entity")
+            or payload.get("processor")
+            or processor_entity
+            or ""
+        ).strip()
+
+    for candidate in candidates:
+        parsed = urlsplit(candidate)
+        if (
+            parsed.scheme == "https"
+            and parsed.hostname in {"chatgpt.com", "pay.openai.com"}
+            and session_id in candidate
+        ):
+            return candidate
+
+    if not re.fullmatch(r"[A-Za-z_]+", processor_entity):
+        return ""
+    return (
+        "https://chatgpt.com/checkout/"
+        f"{quote(processor_entity, safe='_')}/{quote(session_id, safe='_')}"
+    )
 
 
 def extract_stripe_checkout_session_id(payload: Any, raw_text: str = "") -> str:
@@ -593,7 +646,13 @@ def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: 
     if not sid:
         sid = raw_session_id
     data["checkout_session_id"] = sid
-    data["checkout_url"] = url or (f"https://pay.openai.com/c/pay/{sid}{STRIPE_CHECKOUT_FRAGMENT}" if sid else "")
+    if is_openai_checkout_session_id(sid):
+        data["openai_checkout_session_id"] = sid
+        data["checkout_url"] = openai_managed_checkout_url(data, sid)
+    else:
+        data["checkout_url"] = url or (
+            f"https://pay.openai.com/c/pay/{sid}{STRIPE_CHECKOUT_FRAGMENT}" if sid else ""
+        )
     return {"data": data, "http": http}
 
 
@@ -1375,10 +1434,10 @@ class JobStore:
             session_id = checkout_data.get("checkout_session_id") or ""
             if session_id and not is_stripe_checkout_session_id(session_id):
                 # Do not pass an oaics_* OpenAI-owned ID to Stripe's
-                # /v1/payment_pages/<id>/init.  A previous adapter revision
-                # assumed checkout/update would materialize a cs_live_* ID;
-                # current responses can keep returning oaics_* instead.
-                if not promo_requested:
+                # /v1/payment_pages/<id>/init.  If OpenAI does not expose a
+                # nested cs_* after update, keep the session on OpenAI's
+                # official managed checkout route instead.
+                if not is_openai_checkout_session_id(session_id):
                     raise checkout_session_contract_error(checkout_data, "Checkout")
                 processor_entity = str(
                     checkout_data.get("processor_entity")
@@ -1394,35 +1453,69 @@ class JobStore:
                         "Checkout 返回 OpenAI 内部 Session，但缺少 processor_entity，无法换取 Stripe Session"
                     )
                 openai_session_id = str(session_id)
-                self.log(
-                    job_id,
-                    f"Checkout 返回 OpenAI 内部 Session {openai_session_id[:32]}，先通过 checkout/update 获取 Stripe Session",
-                )
-                materialized = update_checkout_promo(
-                    promo_chatgpt_http,
-                    token,
-                    openai_session_id,
-                    processor_entity,
-                    options.get("promo_campaign") or "plus-1-month-free",
-                    lambda m: self.log(job_id, m),
-                    device_id=device_id,
-                )
-                resolved_session_id = extract_stripe_checkout_session_id(materialized)
-                if not resolved_session_id:
-                    raise checkout_session_contract_error(materialized, "checkout/update")
-                checkout_data["openai_checkout_session_id"] = openai_session_id
-                session_id = resolved_session_id
-                checkout_data["checkout_session_id"] = session_id
+                materialized: dict[str, Any] = {}
+                if promo_requested:
+                    self.log(
+                        job_id,
+                        f"Checkout 返回 OpenAI 内部 Session {openai_session_id[:32]}，"
+                        "先更新优惠并识别后续 Checkout 协议",
+                    )
+                    materialized = update_checkout_promo(
+                        promo_chatgpt_http,
+                        token,
+                        openai_session_id,
+                        processor_entity,
+                        options.get("promo_campaign") or "plus-1-month-free",
+                        lambda m: self.log(job_id, m),
+                        device_id=device_id,
+                    )
+                    if materialized.get("success") is False:
+                        raise RuntimeError("checkout/update 未接受本次优惠更新")
+
                 nested_session = materialized.get("checkout_session")
                 if isinstance(nested_session, dict):
                     for key in ("publishable_key", "processor_entity", "return_url", "url"):
                         if nested_session.get(key):
                             checkout_data[key] = nested_session[key]
-                options["promo_preapplied"] = True
-                self.log(
-                    job_id,
-                    f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
-                )
+                resolved_session_id = extract_stripe_checkout_session_id(materialized)
+                if resolved_session_id:
+                    checkout_data["openai_checkout_session_id"] = openai_session_id
+                    session_id = resolved_session_id
+                    checkout_data["checkout_session_id"] = session_id
+                    options["promo_preapplied"] = promo_requested
+                    self.log(
+                        job_id,
+                        f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
+                    )
+                else:
+                    managed_url = openai_managed_checkout_url(
+                        materialized or checkout_data,
+                        openai_session_id,
+                        processor_entity,
+                    ) or openai_managed_checkout_url(
+                        checkout_data,
+                        openai_session_id,
+                        processor_entity,
+                    )
+                    if not managed_url:
+                        raise checkout_session_contract_error(
+                            materialized or checkout_data,
+                            "OpenAI managed Checkout",
+                        )
+                    session_id = openai_session_id
+                    checkout_data["checkout_session_id"] = session_id
+                    checkout_data["openai_checkout_session_id"] = session_id
+                    checkout_data["checkout_url"] = managed_url
+                    checkout_data["processor_entity"] = processor_entity
+                    options["openai_managed_checkout"] = True
+                    options["promo_update_accepted"] = bool(
+                        promo_requested and materialized.get("success") is True
+                    )
+                    self.log(
+                        job_id,
+                        "当前为 OpenAI 托管 oaics_* Checkout；已切换官方结账页，"
+                        "不再调用 Stripe payment_page",
+                    )
             if not session_id and provider != "hosted":
                 raise RuntimeError("Checkout 未返回 Stripe Session ID")
             if self.cancelled(job_id):
@@ -1466,6 +1559,37 @@ class JobStore:
                         job_id,
                         "Stage1 one_click 标记为 false；该字段不代表活动资格，继续以金额与 approval 结果判定",
                     )
+            if options.get("openai_managed_checkout"):
+                if provider not in {"paypal", "hosted"}:
+                    raise checkout_session_contract_error(
+                        checkout_data,
+                        f"{provider.upper()} OpenAI managed Checkout",
+                    )
+                managed_url = str(checkout_data.get("checkout_url") or "")
+                result.update({
+                    "provider": provider,
+                    "provider_redirect_url": managed_url,
+                    "checkout_url": managed_url,
+                    "checkout_flow": "openai_managed",
+                    "requires_browser": True,
+                    "processor_entity": checkout_data.get("processor_entity") or "",
+                    "promo_update_accepted": bool(options.get("promo_update_accepted")),
+                    "promotion_eligibility_decided_by": "official_checkout_page",
+                })
+                if promo_requested and options.get("promo_update_accepted"):
+                    self.log(
+                        job_id,
+                        "OpenAI 已接受优惠更新；最终金额和 PayPal 可用性请在官方结账页确认",
+                    )
+                else:
+                    self.log(job_id, "PayPal 可用性和最终金额请在 OpenAI 官方结账页确认")
+                done_text = (
+                    "OpenAI 官方 PayPal 结账页已生成"
+                    if provider == "paypal"
+                    else "OpenAI 官方支付长链已生成"
+                )
+                self.update(job_id, percent=100, text=done_text, status="done", result=result)
+                return
             if provider == "hosted":
                 self.update(job_id, percent=56, text="正在检测官方长链金额")
                 if not session_id:
