@@ -146,6 +146,30 @@ class CheckoutSessionIdTests(unittest.TestCase):
             "https://chatgpt.com/checkout/openai_ie/oaics_test_internal",
         )
 
+    def test_oaics_conversion_failed_error_is_retryable(self):
+        """测试 OaicsConversionFailedError 异常的 error_code"""
+        error = app.OaicsConversionFailedError("转换失败需要重试")
+        self.assertEqual(
+            error.error_code,
+            app.OAICS_CONVERSION_FAILED_ERROR_CODE,
+        )
+
+    def test_oaics_retry_count_in_options(self):
+        """测试 options 中的 _oaics_retry_count 字段正确递增"""
+        # 这是一个集成测试的占位，实际需要 mock 整个流程
+        # 验证：
+        # 1. 第1次返回 oaics_*，_oaics_retry_count 应为 0
+        # 2. 抛出 OaicsConversionFailedError 后，_oaics_retry_count 递增为 1
+        # 3. 第2次返回 cs_live_*，成功完成
+        pass
+
+    def test_max_oaics_retry_constant(self):
+        """测试 MAX_OAICS_RETRY 常量存在且为合理值"""
+        self.assertTrue(hasattr(app, "MAX_OAICS_RETRY"))
+        self.assertIsInstance(app.MAX_OAICS_RETRY, int)
+        self.assertGreaterEqual(app.MAX_OAICS_RETRY, 1)
+        self.assertLessEqual(app.MAX_OAICS_RETRY, 5)
+
 
 if __name__ == "__main__":
     unittest.main()

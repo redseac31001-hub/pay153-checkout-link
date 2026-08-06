@@ -46,12 +46,20 @@ _STRIPE_CHECKOUT_SESSION_RE = re.compile(
 _OPENAI_CHECKOUT_SESSION_RE = re.compile(r"oaics_[A-Za-z0-9_]+")
 
 CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
+OAICS_CONVERSION_FAILED_ERROR_CODE = "oaics_conversion_failed_retry"
+MAX_OAICS_RETRY = 0  # OpenAI 已全面切换到 oaics_*，禁用重试以节省时间
 
 
 class CheckoutSessionContractError(RuntimeError):
     """Raised when OpenAI returns a session shape this Stripe adapter cannot use."""
 
     error_code = CHECKOUT_SESSION_CONTRACT_ERROR_CODE
+
+
+class OaicsConversionFailedError(RuntimeError):
+    """当 oaics_* 无法转换为 cs_live_* 时抛出，触发外层重试逻辑。"""
+
+    error_code = OAICS_CONVERSION_FAILED_ERROR_CODE
 
 
 def is_stripe_checkout_session_id(value: Any) -> bool:
@@ -725,6 +733,55 @@ def promo_campaign_from_payload(payload: Any) -> str:
     return candidates[0] if candidates else ""
 
 
+PROXY_PROBE_URLS = (
+    "https://ipinfo.io/json",
+    "https://ipapi.co/json/",
+)
+PROXY_PROBE_URL = PROXY_PROBE_URLS[0]
+PROXY_PROBE_TIMEOUT = 12
+
+
+def probe_proxy_identity(proxy: str) -> dict[str, str]:
+    """Make the smallest successful number of requests and report proxy identity."""
+    http = sc.build_http(proxy)
+    errors: list[str] = []
+    try:
+        for url in PROXY_PROBE_URLS:
+            try:
+                resp = http.get(url, timeout=PROXY_PROBE_TIMEOUT)
+                if resp.status_code != 200:
+                    errors.append(f"{url} HTTP {resp.status_code}")
+                    continue
+                data = resp.json() or {}
+                if str(data.get("status") or "success").lower() == "fail":
+                    errors.append(f"{url} upstream rejected probe")
+                    continue
+                ip = str(data.get("ip") or data.get("query") or "").strip()
+                country_value = str(data.get("country_code") or data.get("countryCode") or "").strip()
+                if not country_value and re.fullmatch(r"[A-Za-z]{2}", str(data.get("country") or "")):
+                    country_value = str(data.get("country") or "")
+                country = country_value.upper()
+                if not ip or not re.fullmatch(r"[A-Z]{2}", country):
+                    errors.append(f"{url} response missing ip/country")
+                    continue
+                country_name = str(data.get("country_name") or data.get("country") or country).strip()
+                if country_name.upper() == country:
+                    country_name = country
+                return {
+                    "ip": ip,
+                    "country": country,
+                    "country_name": country_name,
+                }
+            except Exception as exc:
+                errors.append(f"{url} {type(exc).__name__}")
+        raise RuntimeError("; ".join(errors[-2:]) or "no response")
+    finally:
+        try:
+            http.close()
+        except Exception:
+            pass
+
+
 def proxy_geo(proxy: str) -> dict[str, str]:
     http = sc.build_http(proxy)
     probes = (
@@ -747,8 +804,10 @@ def proxy_geo(proxy: str) -> dict[str, str]:
             if not re.fullmatch(r"[A-Z]{3}", currency):
                 currency = ""
             return {
+                "ip": str(data.get("ip") or data.get("query") or ""),
                 "country": country,
                 "currency": currency,
+                "country_name": str(data.get("country") or country),
                 "region": str(data.get("region") or data.get("region_name") or data.get("regionName") or ""),
                 "city": str(data.get("city") or ""),
                 "postal": str(data.get("postal") or data.get("zip") or ""),
@@ -1232,6 +1291,20 @@ class JobStore:
             last_error = str(state.get("error") or "")
             lowered = last_error.lower()
             error_code = str(state.get("error_code") or "")
+
+            # oaics 转换失败是可重试的，需要递增计数器
+            if error_code == OAICS_CONVERSION_FAILED_ERROR_CODE:
+                current_oaics_retry = current.get("_oaics_retry_count", 0)
+                current["_oaics_retry_count"] = current_oaics_retry + 1
+                self.log(
+                    job_id,
+                    f"[oaics 重试 {current_oaics_retry + 1}/{MAX_OAICS_RETRY}] "
+                    "换用新代理池重新创建 Checkout"
+                )
+                # 不计入 max_attempts，直接重试
+                time.sleep(1.5)
+                continue
+
             non_retryable = error_code == CHECKOUT_SESSION_CONTRACT_ERROR_CODE or any(marker in lowered for marker in (
                 "access token", "token_invalidated", "token_expired", "token_revoked", "jwt expired",
                 "计划类型", "提取方式", "任务已停止",
@@ -1274,9 +1347,9 @@ class JobStore:
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，代理池 2 共 {len(exit_pool)} 条，本次已分别自动选择")
             self.log(
                 job_id,
-                "代理链：本地第一跳已启用（PAY153_PROXY_PRE_PROXY），代理池条目作为最终出口"
+                "代理链：SOCKS5 本地第一跳已启用（PAY153_PROXY_PRE_PROXY），代理池条目作为最终出口"
                 if sc.proxy_pre_proxy()
-                else "代理链：未启用本地第一跳，代理池直接连接",
+                else "代理链：未启用 SOCKS5 本地第一跳，代理池直接连接",
             )
             # Every outer retry creates a brand-new Checkout, so it must also
             # use a fresh browser/device identity.  Within this single attempt
@@ -1488,34 +1561,53 @@ class JobStore:
                         f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
                     )
                 else:
-                    managed_url = openai_managed_checkout_url(
-                        materialized or checkout_data,
-                        openai_session_id,
-                        processor_entity,
-                    ) or openai_managed_checkout_url(
-                        checkout_data,
-                        openai_session_id,
-                        processor_entity,
-                    )
-                    if not managed_url:
-                        raise checkout_session_contract_error(
-                            materialized or checkout_data,
-                            "OpenAI managed Checkout",
+                    # oaics_* 转换失败，检查是否已重试过
+                    current_oaics_retry = options.get("_oaics_retry_count", 0)
+                    if current_oaics_retry < MAX_OAICS_RETRY:
+                        # 抛出异常触发重试
+                        self.log(
+                            job_id,
+                            f"oaics_* 转换失败（第 {current_oaics_retry + 1} 次尝试），"
+                            f"将自动重试新流程（剩余 {MAX_OAICS_RETRY - current_oaics_retry} 次）"
                         )
-                    session_id = openai_session_id
-                    checkout_data["checkout_session_id"] = session_id
-                    checkout_data["openai_checkout_session_id"] = session_id
-                    checkout_data["checkout_url"] = managed_url
-                    checkout_data["processor_entity"] = processor_entity
-                    options["openai_managed_checkout"] = True
-                    options["promo_update_accepted"] = bool(
-                        promo_requested and materialized.get("success") is True
-                    )
-                    self.log(
-                        job_id,
-                        "当前为 OpenAI 托管 oaics_* Checkout；已切换官方结账页，"
-                        "不再调用 Stripe payment_page",
-                    )
+                        raise OaicsConversionFailedError(
+                            f"oaics_* 转换为 cs_live_* 失败，需要重试（已尝试 {current_oaics_retry + 1} 次）"
+                        )
+                    else:
+                        # 重试次数耗尽，回退到 OpenAI 托管结账页
+                        managed_url = openai_managed_checkout_url(
+                            materialized or checkout_data,
+                            openai_session_id,
+                            processor_entity,
+                        ) or openai_managed_checkout_url(
+                            checkout_data,
+                            openai_session_id,
+                            processor_entity,
+                        )
+                        if not managed_url:
+                            raise checkout_session_contract_error(
+                                materialized or checkout_data,
+                                "OpenAI managed Checkout",
+                            )
+                        self.log(
+                            job_id,
+                            f"oaics_* 转换失败且已重试 {MAX_OAICS_RETRY} 次，"
+                            "切换为 OpenAI 托管结账页，需要浏览器完成"
+                        )
+                        session_id = openai_session_id
+                        checkout_data["checkout_session_id"] = session_id
+                        checkout_data["openai_checkout_session_id"] = session_id
+                        checkout_data["checkout_url"] = managed_url
+                        checkout_data["processor_entity"] = processor_entity
+                        options["openai_managed_checkout"] = True
+                        options["promo_update_accepted"] = bool(
+                            promo_requested and materialized.get("success") is True
+                        )
+                        self.log(
+                            job_id,
+                            "当前为 OpenAI 托管 oaics_* Checkout；已切换官方结账页，"
+                            "不再调用 Stripe payment_page",
+                        )
             if not session_id and provider != "hosted":
                 raise RuntimeError("Checkout 未返回 Stripe Session ID")
             if self.cancelled(job_id):
@@ -1545,6 +1637,10 @@ class JobStore:
                 "promotion_eligibility_decided_by": "checkout_approve",
                 "entry_country": str(locals().get("main_country") or "").upper(),
                 "payment_proxy_country": str(options.get("payment_proxy_country") or locals().get("payment_country") or "").upper(),
+                "oaics_retry_count": options.get("_oaics_retry_count", 0),
+                "oaics_retry_success": bool(
+                    options.get("_oaics_retry_count", 0) > 0 and is_stripe_checkout_session_id(session_id)
+                ),
             }
             if promo_requested:
                 checkout_trial = checkout_data.get("one_click_trial_eligible")
@@ -1970,6 +2066,33 @@ def config():
             "queue_enabled": True,
             "workers": STORE.worker_limit,
         },
+    })
+
+
+@app.post("/api/proxy-probe")
+def proxy_probe():
+    data = request.get_json(silent=True) or {}
+    pool_label = str(data.get("pool") or "代理池").strip()[:40] or "代理池"
+    try:
+        proxies = normalize_proxy_pool(data.get("proxies"), pool_label)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not proxies:
+        return jsonify({"error": f"{pool_label}至少填写 1 条代理"}), 400
+
+    selected = secrets.choice(proxies)
+    try:
+        identity = probe_proxy_identity(selected)
+    except Exception as exc:
+        return jsonify({
+            "error": f"{pool_label}随机检测失败：{type(exc).__name__}",
+        }), 502
+    return jsonify({
+        "ok": True,
+        "pool": pool_label,
+        "pool_size": len(proxies),
+        "selected_index": proxies.index(selected) + 1,
+        **identity,
     })
 
 

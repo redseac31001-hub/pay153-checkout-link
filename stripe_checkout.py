@@ -39,36 +39,50 @@ PAYPAL_STRIPE_VERSION = (
     "checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 )
 
-# The proxy pool is the exit hop.  The local proxy is used as curl's
-# CURLOPT_PRE_PROXY so every connection to a pool proxy is established
-# through it first.  This is different from setting the local proxy as the
-# normal proxy: the latter would discard the selected pool exit proxy.
+# The proxy pool is the exit hop.  CURLOPT_PRE_PROXY only supports a SOCKS
+# pre-proxy, so the local gateway must be addressed as SOCKS5.  This is
+# different from setting the local gateway as the normal proxy: the latter
+# discards the selected pool exit proxy.
 PROXY_PRE_PROXY_ENV = "PAY153_PROXY_PRE_PROXY"
-DEFAULT_PROXY_PRE_PROXY = "http://127.0.0.1:9697"
+DEFAULT_PROXY_PRE_PROXY = "socks5h://127.0.0.1:9697"
 _DISABLED_PROXY_VALUES = {"0", "false", "off", "none", "direct", "disable", "disabled"}
+_SOCKS_PRE_PROXY_SCHEMES = {"socks4", "socks4a", "socks5", "socks5h"}
 
 
 def proxy_pre_proxy() -> str | None:
     """Return the first-hop proxy for all configured proxy-pool exits.
 
-    The default intentionally points at the local gateway requested by the
-    application deployment.  Set ``PAY153_PROXY_PRE_PROXY`` to an empty value
-    or one of the disabled values to use the pool proxy directly.
+    The default intentionally points at the local SOCKS5 gateway requested by
+    the application deployment.  Set ``PAY153_PROXY_PRE_PROXY`` to an empty
+    value or one of the disabled values to use the pool proxy directly.
+
+    Older deployments may still set an ``http://`` value.  Convert that
+    legacy label to ``socks5h://`` because libcurl's PRE_PROXY option cannot
+    chain an HTTP pre-proxy; it only accepts SOCKS.
     """
     value = os.getenv(PROXY_PRE_PROXY_ENV, DEFAULT_PROXY_PRE_PROXY).strip()
     if not value or value.casefold() in _DISABLED_PROXY_VALUES:
         return None
     if "://" not in value:
-        value = f"http://{value}"
+        value = f"socks5h://{value}"
+    parsed = urlsplit(value)
+    scheme = parsed.scheme.casefold()
+    if scheme in {"http", "https"}:
+        value = urlunsplit(("socks5h", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
+        scheme = "socks5h"
+    if scheme not in _SOCKS_PRE_PROXY_SCHEMES:
+        raise ValueError(
+            f"{PROXY_PRE_PROXY_ENV} 必须是 SOCKS 前置代理（socks5h://host:port）"
+        )
     return value
 
 
 def proxy_curl_options() -> dict:
     """Build curl options for the local first-hop proxy.
 
-    curl's PRE_PROXY option supports HTTP and SOCKS pre-proxies and keeps the
-    pool entry as the real proxy/exit hop.  Keeping this in one helper makes
-    sync and async requests use exactly the same chain.
+    curl's PRE_PROXY option supports SOCKS pre-proxies and keeps the pool
+    entry as the real proxy/exit hop.  Keeping this in one helper makes sync
+    and async requests use exactly the same chain.
     """
     pre_proxy = proxy_pre_proxy()
     if not pre_proxy:

@@ -159,7 +159,15 @@ select{cursor:pointer}
 .local-save-tag{padding:7px 10px;color:#14835e;background:rgba(28,168,121,.09);border:1px solid rgba(28,168,121,.18)}
 .local-save-tag.save-failed{color:var(--danger);background:rgba(220,82,96,.10);border-color:rgba(220,82,96,.22)}
 .proxy-block .field{margin-bottom:0}
+.proxy-label-row{align-items:center}
+.proxy-label-row>span{display:flex;align-items:center;gap:5px}
+.proxy-probe-button{flex:none;border:1px solid rgba(5,169,199,.28);border-radius:9px;padding:6px 9px;background:rgba(5,169,199,.07);color:var(--brand);font:800 10px var(--sans);cursor:pointer;transition:.18s}
+.proxy-probe-button:hover{border-color:var(--brand);background:rgba(5,169,199,.13);transform:translateY(-1px)}
+.proxy-probe-button:disabled{cursor:wait;opacity:.62;transform:none}
 .proxy-pool-input{min-height:220px;resize:vertical;overflow-x:hidden;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-all;padding:15px;font:12px/1.72 var(--mono)}
+.proxy-probe-result{display:block;margin-top:7px;color:var(--muted);font:10px/1.55 var(--mono)}
+.proxy-probe-result.success{color:var(--success)}
+.proxy-probe-result.error{color:var(--danger)}
 .proxy-foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:14px;padding-top:14px;border-top:1px dashed var(--line);color:var(--muted);font-size:10px;line-height:1.55}
 .proxy-foot button{flex:none;border:1px solid var(--line);border-radius:11px;padding:9px 12px;background:var(--surface);color:var(--brand);font:800 10px var(--sans);cursor:pointer;transition:.18s}
 .proxy-foot button:hover{border-color:var(--brand);transform:translateY(-1px)}

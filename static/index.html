@@ -95,8 +95,16 @@
             <div class="block-tags"><span id="proxySaveState" class="local-save-tag">本地自动保存</span><span class="required-tag">任务必填</span></div>
           </div>
           <div class="two-cols" id="proxyGrid">
-            <label class="field"><span>代理池 1 <small id="entryProxyCount">0 / 500</small></span><textarea id="entryProxy" class="proxy-pool-input" required autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea></label>
-            <label class="field" id="exitProxyField" hidden><span>代理池 2 <small><i id="exitProxyHint">推荐代理</i> · <b id="exitProxyCount">0 / 500</b></small></span><textarea id="exitProxy" class="proxy-pool-input" autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea></label>
+            <label class="field">
+              <span class="proxy-label-row"><span>代理池 1 <small id="entryProxyCount">0 / 500</small></span><button id="probeEntryProxy" class="proxy-probe-button" type="button">随机检测</button></span>
+              <textarea id="entryProxy" class="proxy-pool-input" required autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea>
+              <small id="entryProxyProbe" class="proxy-probe-result" aria-live="polite">检测只随机使用 1 条代理，查询公网 IP 和国家。</small>
+            </label>
+            <label class="field" id="exitProxyField" hidden>
+              <span class="proxy-label-row"><span>代理池 2 <small><i id="exitProxyHint">推荐代理</i> · <b id="exitProxyCount">0 / 500</b></small></span><button id="probeExitProxy" class="proxy-probe-button" type="button">随机检测</button></span>
+              <textarea id="exitProxy" class="proxy-pool-input" autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea>
+              <small id="exitProxyProbe" class="proxy-probe-result" aria-live="polite">检测只随机使用 1 条代理，查询公网 IP 和国家。</small>
+            </label>
           </div>
           <div class="retry-setting">
             <label class="field"><span>失败重试次数 <small>1-50 次</small></span><input id="retryCount" type="number" min="1" max="50" value="10"></label>

@@ -34,6 +34,40 @@ function updateProxyCount(node, counter){
   node.setCustomValidity(count > 500 ? '每个代理池最多填写 500 条' : '');
   return count;
 }
+function setProxyProbeResult(node, text, state=''){
+  node.textContent = text;
+  node.className = `proxy-probe-result${state ? ` ${state}` : ''}`;
+}
+async function probeProxyPool(inputId, buttonId, resultId, poolLabel){
+  const input = $(inputId), button = $(buttonId), result = $(resultId);
+  const proxies = proxyLines(input);
+  if (!proxies.length){
+    setProxyProbeResult(result, '请先填写至少 1 条代理。', 'error');
+    input.focus();
+    return;
+  }
+  button.disabled = true;
+  setProxyProbeResult(result, '正在随机检测 1 条代理……');
+  try{
+    const response = await fetch('/api/proxy-probe', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({pool: poolLabel, proxies})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const country = [data.country, data.country_name].filter(Boolean).join(' / ');
+    setProxyProbeResult(
+      result,
+      `随机第 ${data.selected_index}/${data.pool_size} 条：IP ${data.ip || '?'} · ${country || '国家未知'}`,
+      'success'
+    );
+  }catch(error){
+    setProxyProbeResult(result, `检测失败：${error.message || error}`, 'error');
+  }finally{
+    button.disabled = false;
+  }
+}
 function setProxySaveState(text, failed=false){
   const node = $('proxySaveState');
   node.textContent = text;
@@ -113,6 +147,8 @@ $('country').addEventListener('change', () => $('currency').value = countryCurre
 $('usePromo').addEventListener('change', () => syncFields(false));
 $('entryProxy').addEventListener('input', () => { updateProxyCount($('entryProxy'), $('entryProxyCount')); saveProxyPools(); });
 $('exitProxy').addEventListener('input', () => { updateProxyCount($('exitProxy'), $('exitProxyCount')); saveProxyPools(); });
+$('probeEntryProxy').addEventListener('click', () => probeProxyPool('entryProxy', 'probeEntryProxy', 'entryProxyProbe', '代理池 1'));
+$('probeExitProxy').addEventListener('click', () => probeProxyPool('exitProxy', 'probeExitProxy', 'exitProxyProbe', '代理池 2'));
 $('copyEntryProxy').addEventListener('click', () => {
   $('exitProxy').value = $('entryProxy').value.trim();
   updateProxyCount($('exitProxy'), $('exitProxyCount'));

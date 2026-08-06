@@ -118,7 +118,7 @@ cp .env.example .env
 | `PAY153_IP_RPM` | 单 IP 每分钟任务上限 |
 | `PAY153_LOG_DIR` | 完整后台日志目录 |
 | `PAY153_LEGACY_BASE` | 旧服务兼容地址，可选 |
-| `PAY153_PROXY_PRE_PROXY` | 代理池第一跳，默认 `http://127.0.0.1:9697`；留空可关闭 |
+| `PAY153_PROXY_PRE_PROXY` | SOCKS 前置代理，默认 `socks5h://127.0.0.1:9697`；留空可关闭 |
 | `PAYPAL_APPROVE_POLL_ATTEMPTS` | PayPal 审批后等待跳转地址的轮询次数，默认 6，范围 1-12 |
 
 ## 代理池
@@ -134,7 +134,7 @@ socks5://username:password@host:port
 
 任务提交后会根据支付路径和地区选择代理；代理凭据仅应通过网页或环境变量传入。
 
-代理池采用两跳链路：本地 `PAY153_PROXY_PRE_PROXY` 是第一跳，代理池中的每条代理是最终出口。程序通过 curl 的 `PRE_PROXY` 建立到代理池节点的连接，因此不会把本地 9697 误当成地区出口。9697 必须允许 CONNECT 到代理池节点；如果本地代理服务不可用，所有代理池检测都会失败。设置 `PAY153_PROXY_PRE_PROXY=` 可恢复代理池直连。
+代理池采用两跳链路：本地 SOCKS5 `PAY153_PROXY_PRE_PROXY` 是第一跳，代理池中的每条代理是最终出口。程序通过 curl 的 `PRE_PROXY` 建立到代理池节点的连接，因此不会把本地 9697 误当成地区出口。9697 必须支持 SOCKS5 并允许连接到代理池节点；如果本地代理服务不可用，所有代理池检测都会失败。设置 `PAY153_PROXY_PRE_PROXY=` 可恢复代理池直连。
 
 ## 生产部署
 
