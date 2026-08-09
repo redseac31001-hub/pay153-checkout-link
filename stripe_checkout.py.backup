@@ -35,7 +35,7 @@ STRIPE_VERSION_FULL = (
 )
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
 PAYPAL_STRIPE_VERSION = (
-    "2025-03-31.basil; "
+    "2020-08-27;custom_checkout_beta=v1; "
     "checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 )
 
