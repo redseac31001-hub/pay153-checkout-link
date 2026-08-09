@@ -160,7 +160,8 @@ COUNTRY_CURRENCY = {
 }
 
 # 支持 PayPal 的下单地区（EU/EUR）。US/USD 只有 card。
-PAYPAL_ORDER_COUNTRIES = ["US", "DE", "FR", "IE", "NL", "ES", "IT", "AT"]
+# 新增 GB：英国是欧洲主要市场，支持 PayPal 且 OpenAI 接受 GBP
+PAYPAL_ORDER_COUNTRIES = ["US", "DE", "FR", "IE", "NL", "ES", "IT", "AT", "GB"]
 
 
 def currency_for_country(country: str) -> str:
@@ -1022,20 +1023,43 @@ def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dic
             continue
         url = extract_redirect_url(gj)
         if url:
+            log(f"[stripe] ✅ poll {i + 1}/{max_attempts} 成功获取跳转地址")
             return url
         sa = (gj.get("submission_attempt") or {}).get("state")
         payment_intent = gj.get("payment_intent") or {}
         setup_intent = gj.get("setup_intent") or {}
         decline = payment_intent.get("last_payment_error") or setup_intent.get("last_setup_error") or {}
+        decline_code = decline.get("decline_code") or decline.get("code") or ""
+        decline_msg = decline.get("message") or ""
+        next_action = setup_intent.get("next_action") or payment_intent.get("next_action") or {}
+        next_action_type = next_action.get("type") or "none"
         log(
             f"[stripe] approve 后 poll {i + 1}/{max_attempts}: sub_state={sa} "
             f"payment_status={payment_intent.get('status') or ''} "
             f"setup_status={setup_intent.get('status') or ''} "
-            f"decline_code={decline.get('decline_code') or decline.get('code') or ''} "
-            f"decline_message={decline.get('message') or ''}"
+            f"next_action_type={next_action_type} "
+            f"decline_code={decline_code} "
+            f"decline_message={decline_msg}"
         )
+        # generic_decline 诊断：记录可能的原因
+        if "generic_decline" in decline_code or "generic_decline" in decline_msg.lower():
+            log(
+                "[stripe] ⚠️ generic_decline 检测（常见原因）：1) 代理 IP 被 PayPal 风控；"
+                "2) 账单地址与 PayPal 账户国家不匹配；3) Stripe 指纹字段冲突"
+            )
         if i + 1 < max_attempts:
             time.sleep(1)
+
+    # 轮询失败，保存最后一次响应用于诊断
+    try:
+        import pathlib
+        pathlib.Path("_poll_last_response.json").write_text(
+            json.dumps(gj if gj else {}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        log("[stripe] 轮询失败，最后一次响应已保存到 _poll_last_response.json（供诊断）")
+    except Exception:
+        pass
+
     return ""
 
 

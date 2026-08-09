@@ -24,6 +24,13 @@ import stripe_checkout as sc
 from provider_checkout import PROVIDER_DEFAULTS, default_billing, stripe_to_provider
 from sentinel_token import SentinelTokenProvider as BaseSentinel
 
+# 加载 .env 文件中的环境变量
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv 未安装，跳过
+
 
 ROOT = Path(__file__).resolve().parent
 BACKEND_LOG_DIR = Path(os.getenv("PAY153_LOG_DIR", str(ROOT / "logs")))
@@ -1248,7 +1255,9 @@ class JobStore:
                 # remove PayPal from Stripe's available payment methods. Keep
                 # PayPal in the initial Checkout, then apply the campaign via
                 # checkout/update and verify that Stripe reaches amount=0.
-                current["promo_on_create"] = False
+                # 优化策略：优先使用分离优惠（promo_on_create=False）避免零金额移除 PayPal
+                # 仅在第 4、7、10... 轮尝试原生优惠以平衡风控特征
+                current["promo_on_create"] = (attempt % 3 == 1) if attempt > 3 else False
             if current.get("link_type") in {"pix", "upi"}:
                 # Alternate both Stripe submission shapes across outer retries.
                 # Some Checkout revisions accept a pre-created pm_* while
@@ -1799,19 +1808,31 @@ class JobStore:
             if provider == "paypal":
                 paypal_country = str(options.get("payment_proxy_country") or country).upper()
                 if paypal_country != country:
-                    paypal_payment_billing = default_billing(
-                        paypal_country,
-                        meta.get("email") or "",
-                        geo=payment_geo,
-                        real_random=True,
-                    )
-                    paypal_address = paypal_payment_billing.get("address") or {}
-                    self.log(
-                        job_id,
-                        f"PayPal separated billing: OpenAI={country}/{options.get('currency')}, "
-                        f"PayPal={paypal_country}, city={paypal_address.get('city') or '-'}, "
-                        f"postal={paypal_address.get('postal_code') or '-'}",
-                    )
+                    # 检查是否因白名单回退导致国家不一致
+                    direct_countries = {str(item).upper() for item in getattr(sc, "PAYPAL_ORDER_COUNTRIES", [])}
+                    if paypal_country not in direct_countries and country == "DE":
+                        # 代理国家不在白名单，已回退到 DE，统一使用 DE 账单
+                        self.log(
+                            job_id,
+                            f"PayPal 账单统一：代理国家 {paypal_country} 未在白名单，"
+                            f"统一使用回退国家 {country} 避免账单冲突",
+                        )
+                        # 不创建分离账单，paypal_payment_billing 保持 None
+                    else:
+                        # 正常分离账单场景（两个国家都在白名单内）
+                        paypal_payment_billing = default_billing(
+                            paypal_country,
+                            meta.get("email") or "",
+                            geo=payment_geo,
+                            real_random=True,
+                        )
+                        paypal_address = paypal_payment_billing.get("address") or {}
+                        self.log(
+                            job_id,
+                            f"PayPal separated billing: OpenAI={country}/{options.get('currency')}, "
+                            f"PayPal={paypal_country}, city={paypal_address.get('city') or '-'}, "
+                            f"postal={paypal_address.get('postal_code') or '-'}",
+                        )
             promotion_billing = None
             if provider == "paypal" and promo_requested:
                 promotion_country = str(main_country or "BR").upper()

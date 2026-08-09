@@ -1062,7 +1062,11 @@ def stripe_to_provider(
     init_data, version, ctx = sc.init_checkout(http, session_id, pk, profile, log)
     methods = ctx.get("payment_method_types") or []
     if provider not in methods:
-        raise RuntimeError(f"当前 checkout 未开放 {provider}，可用方式：{', '.join(methods) or 'card'}")
+        amount_hint = f"，金额={ctx.get('checkout_amount')}" if ctx.get("checkout_amount") is not None else ""
+        raise RuntimeError(
+            f"当前 checkout 未开放 {provider}（可能由零金额优惠导致），"
+            f"可用方式：{', '.join(methods) or 'card'}{amount_hint}"
+        )
     sc.fetch_elements_session(http, pk, session_id, ctx, version, profile, log)
     processor = str(stage1.get("processor_entity") or "") or sc._entity_from_return_url(ctx.get("return_url") or init_data.get("return_url") or "") or "openai_llc"
     if apply_promo_callback and not late_promo:
