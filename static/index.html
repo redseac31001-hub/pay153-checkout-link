@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 多通道提链控制台</title>
-  <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Team 与 Codex 空间提链工作台">
-  <link rel="stylesheet" href="/static/styles.css?v=20260716-neo02">
+  <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Gopay、Team 与 Codex 空间提链工作台">
+  <link rel="stylesheet" href="/static/styles.css?v=20260810-billing01">
 </head>
 <body>
   <div class="paper-noise"></div>
@@ -27,13 +27,13 @@
       <div class="hero-copy">
         <div class="eyebrow"><span>01</span> MULTI-RAIL CHECKOUT</div>
         <h1>把支付路径，<em>交给一张控制台。</em></h1>
-        <p>输入会话、选择通道、交给任务队列。Hosted、PayPal、iDEAL、UPI、PIX 与空间方案统一在一个流程内完成。</p>
+        <p>输入会话、选择通道、交给任务队列。Hosted、PayPal、iDEAL、UPI、PIX、Gopay 与空间方案统一在一个流程内完成。</p>
         <div class="hero-chips">
-          <span>PayPal</span><span>iDEAL</span><span>UPI QR</span><span>PIX</span><span>Team</span><span>Codex</span>
+          <span>PayPal</span><span>iDEAL</span><span>UPI QR</span><span>PIX</span><span>Gopay</span><span>Team</span><span>Codex</span>
         </div>
       </div>
       <div class="hero-board" aria-label="服务能力">
-        <div><small>ROUTES</small><strong>05</strong><span>支付通道</span></div>
+        <div><small>ROUTES</small><strong>06</strong><span>支付通道</span></div>
         <div><small>PUBLIC RATE</small><strong>20</strong><span>任务 / 分钟</span></div>
         <div><small>TOKEN MODE</small><strong>RAM</strong><span>仅任务内存</span></div>
       </div>
@@ -71,6 +71,7 @@
             <label class="rail"><input type="radio" name="link_type" value="ideal"><span class="rail-icon">iD</span><span><b>iDEAL</b><small>荷兰银行支付</small></span></label>
             <label class="rail"><input type="radio" name="link_type" value="upi"><span class="rail-icon">₹</span><span><b>UPI</b><small>印度二维码</small></span></label>
             <label class="rail"><input type="radio" name="link_type" value="pix"><span class="rail-icon">◇</span><span><b>PIX</b><small>巴西即时支付</small></span></label>
+            <label class="rail"><input type="radio" name="link_type" value="gopay"><span class="rail-icon">G</span><span><b>Gopay</b><small>印尼电子钱包</small></span></label>
           </div>
         </fieldset>
 
@@ -79,20 +80,48 @@
             <option value="US">US · 美国</option><option value="DE">DE · 德国</option>
             <option value="FR">FR · 法国</option><option value="NL">NL · 荷兰</option>
             <option value="IN">IN · 印度</option><option value="BR">BR · 巴西</option>
+            <option value="ID">ID · 印度尼西亚</option>
             <option value="GB">GB · 英国</option><option value="JP">JP · 日本</option>
             <option value="AU">AU · 澳大利亚</option><option value="CA">CA · 加拿大</option>
           </select></label>
           <label class="field"><span>币种</span><select id="currency">
             <option>USD</option><option>EUR</option><option>INR</option><option>BRL</option>
+            <option>IDR</option>
             <option>GBP</option><option>JPY</option><option>AUD</option><option>CAD</option>
           </select></label>
         </div>
         <p id="regionAutoHint" class="region-auto-hint" hidden>PayPal 的国家、地区和币种会根据代理池 2 自动识别。</p>
 
+        <section id="billingBlock" class="billing-block" aria-labelledby="billingTitle" hidden>
+          <div class="block-heading">
+            <div><span class="section-index">B</span><div><h3 id="billingTitle">账单地址档案</h3><p>按当前支付方式和国家保存真实账单信息，提交前自动校验一致性。</p></div></div>
+            <div class="block-tags"><span id="billingProfileState" class="proxy-profile-tag">未配置</span><span id="billingSaveState" class="local-save-tag">本地自动保存</span><span id="billingRequiredTag" class="required-tag">Gopay 必填</span></div>
+          </div>
+          <div class="billing-country-row"><span>当前账单国家</span><b id="billingCountry">ID · 印度尼西亚</b></div>
+          <div class="two-cols">
+            <label class="field"><span>账单姓名</span><input id="billingName" autocomplete="name" maxlength="160" placeholder="填写真实账单持有人或企业名称"></label>
+            <label class="field"><span>账单邮箱 <small>留空使用 AT 邮箱</small></span><input id="billingEmail" type="email" autocomplete="email" maxlength="200" placeholder="name@example.com"></label>
+          </div>
+          <label class="field"><span>地址第一行</span><input id="billingLine1" autocomplete="address-line1" maxlength="180" placeholder="填写你有权使用的真实街道地址"></label>
+          <label class="field"><span>地址第二行 <small>选填</small></span><input id="billingLine2" autocomplete="address-line2" maxlength="180" placeholder="公寓、楼层或单位信息"></label>
+          <div class="three-cols">
+            <label class="field"><span>城市</span><input id="billingCity" autocomplete="address-level2" maxlength="100" placeholder="例如 Jakarta"></label>
+            <label class="field"><span>省 / 州 <small>选填</small></span><input id="billingState" autocomplete="address-level1" maxlength="80" placeholder="例如 Jakarta"></label>
+            <label class="field"><span>邮编</span><input id="billingPostalCode" autocomplete="postal-code" maxlength="30" placeholder="例如 10110"></label>
+          </div>
+          <p id="billingHint" class="inline-note">Gopay 仅接受与 ID/印尼 Checkout 一致的账单档案；系统不会随机生成公开地址。</p>
+          <div class="billing-foot"><span id="billingFootHint">切换支付方式或国家时自动恢复对应档案。</span><button id="clearBillingProfile" type="button">清空当前档案</button></div>
+        </section>
+
         <section class="proxy-block" aria-labelledby="proxyTitle">
           <div class="block-heading">
             <div><span class="section-index">P</span><div><h3 id="proxyTitle">代理池</h3><p id="proxyRecommendation">每行填写一个代理，系统会在任务运行时自动选择。</p></div></div>
-            <div class="block-tags"><span id="proxySaveState" class="local-save-tag">本地自动保存</span><span class="required-tag">任务必填</span></div>
+            <div class="block-tags"><span id="proxyProfileState" class="proxy-profile-tag">默认共享</span><span id="proxySaveState" class="local-save-tag">本地自动保存</span><span class="required-tag">任务必填</span></div>
+          </div>
+          <div id="proxyAsnRecommendation" class="proxy-asn-recommendation" aria-labelledby="proxyAsnTitle">
+            <div class="proxy-asn-heading"><div><b id="proxyAsnTitle">当前国家 / 地区 ASN 推荐顺序</b><small id="proxyAsnRecommendationHint">正在读取本地推荐配置</small></div><span id="proxyAsnSaveState" class="local-save-tag">本地自动保存</span></div>
+            <ol id="proxyAsnList" class="proxy-asn-list" aria-live="polite"></ol>
+            <p id="proxyAsnRecommendationNote" class="proxy-asn-note">推荐顺序仅作为选择参考。</p>
           </div>
           <div class="two-cols" id="proxyGrid">
             <label class="field">
@@ -112,7 +141,7 @@
           </div>
           <div class="proxy-foot">
             <span id="proxyFootHint">推荐代理会根据所选支付方式自动显示。</span>
-            <button id="copyEntryProxy" type="button">复制代理池 1 到代理池 2</button>
+            <div class="proxy-foot-actions"><button id="saveProxyDefault" type="button">将当前配置设为默认共享</button><button id="copyEntryProxy" type="button">复制代理池 1 到代理池 2</button></div>
           </div>
         </section>
 
@@ -197,6 +226,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260805-oaics01"></script>
+  <script src="/static/app.js?v=20260810-billing01"></script>
 </body>
 </html>

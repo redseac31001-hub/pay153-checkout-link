@@ -13,16 +13,77 @@ let logAutoFollow = true;
 let renderedLogKey = '';
 
 const PROXY_STORAGE_KEYS = {
-  entry: 'pay153.proxy_pool_1',
-  exit: 'pay153.proxy_pool_2'
+  profiles: 'pay153.proxy_profiles.v1',
+  legacyEntry: 'pay153.proxy_pool_1',
+  legacyExit: 'pay153.proxy_pool_2'
 };
+const BILLING_STORAGE_KEY = 'pay153.billing_profiles.v1';
+const PROXY_ASN_RECOMMENDATION_STORAGE_KEY = 'pay153.proxy_asn_recommendations.v1';
+const BILLING_PROFILE_FIELDS = ['name', 'email', 'line1', 'line2', 'city', 'state', 'postal_code'];
+
+const DEFAULT_PROXY_ASN_RECOMMENDATIONS = {
+  GB: {
+    label: '英国',
+    items: [
+      {asn: 'AS2856', provider: 'BT', tier: 'A', note: '综合首选 · 大型家庭宽带'},
+      {asn: 'AS5607', provider: 'Sky UK', tier: 'A', note: '家庭宽带 · 覆盖较广'},
+      {asn: 'AS5089', provider: 'Virgin Media', tier: 'A', note: '家庭宽带 · 固定线路'},
+      {asn: 'AS13285', provider: 'TalkTalk', tier: 'A', note: '家庭 ISP · 覆盖较广'},
+      {asn: 'AS13037', provider: 'Zen', tier: 'A', note: '家庭 ISP · 网络质量稳定'},
+      {asn: 'AS6871', provider: 'Plusnet', tier: 'A', note: '家庭 ISP · BT 体系'},
+      {asn: 'AS9105', provider: 'TalkTalk', tier: 'B', note: 'TalkTalk 相关家庭网络'},
+      {asn: 'AS12390', provider: 'KCOM', tier: 'B', note: '区域 ISP · 主要覆盖 Hull 一带'},
+      {asn: 'AS43915', provider: 'TrueSpeed', tier: 'B', note: '区域 FTTP · 西南英格兰'},
+      {asn: 'AS201838', provider: 'Community Fibre', tier: 'B', note: '伦敦本地光纤'},
+      {asn: 'AS56478', provider: 'Hyperoptic', tier: 'B', note: '城市光纤 · 覆盖受限'},
+      {asn: 'AS48101', provider: 'Trooli', tier: 'B', note: '区域光纤'},
+      {asn: 'AS56329', provider: 'Gigaclear', tier: 'B', note: '乡村光纤 · 覆盖受限'},
+      {asn: 'AS5482', provider: 'AllPoints Fibre', tier: 'B', note: '区域光纤'},
+      {asn: 'AS212655', provider: 'YouFibre', tier: 'B', note: '区域光纤'},
+      {asn: 'AS207995', provider: 'Lightning Fibre', tier: 'B', note: '区域光纤'},
+      {asn: 'AS60377', provider: 'toob', tier: 'B', note: '区域 FTTH'},
+      {asn: 'AS48294', provider: 'Ogi Networks', tier: 'B', note: '威尔士本地光纤'},
+      {asn: 'AS42611', provider: 'Full Fibre', tier: 'B', note: '区域光纤'},
+      {asn: 'AS205847', provider: 'GoFibre', tier: 'B', note: '苏格兰区域光纤'},
+      {asn: 'AS199775', provider: 'Connexin', tier: 'B', note: '区域宽带/光纤'},
+      {asn: 'AS199468', provider: 'Grain', tier: 'B', note: '区域光纤'},
+      {asn: 'AS213671', provider: 'Vision Fibre', tier: 'B', note: '区域光纤'},
+      {asn: 'AS60426', provider: 'WightFibre', tier: 'B', note: '区域光纤 · 覆盖受限'},
+      {asn: 'AS57099', provider: 'Quickline', tier: 'B', note: '乡村宽带 · 覆盖受限'},
+      {asn: 'AS207645', provider: 'F&W Networks', tier: 'B', note: '小型区域 ISP · 需核验城市'},
+      {asn: 'AS35437', provider: 'Zone Telecom', tier: 'B', note: '小型 ISP · 需核验具体 IP'},
+      {asn: 'AS206067', provider: 'Three UK', tier: 'C', note: '移动网络 · 可能 CGNAT'},
+      {asn: 'AS35228', provider: 'O2 UK', tier: 'C', note: '移动网络 · 可能 CGNAT'},
+      {asn: 'AS14593', provider: 'Starlink', tier: 'C', note: '卫星网络 · 不作为固定宽带首选'},
+      {asn: 'AS25135', provider: 'Vodafone', tier: 'C', note: 'Vodafone 相关 · 需核验 IP 类型'},
+      {asn: 'AS25310', provider: 'Vodafone', tier: 'C', note: 'Vodafone 相关 · 需核验 IP 类型'},
+      {asn: 'AS5378', provider: 'Vodafone', tier: 'C', note: 'Vodafone 相关 · 需核验 IP 类型'},
+      {asn: 'AS31655', provider: 'Gamma Telecom', tier: 'C', note: '企业/电信网络 · 需核验'},
+      {asn: 'AS25369', provider: 'Hydra', tier: 'C', note: '企业/托管混合网络 · 需核验'}
+    ]
+  }
+};
+
+const proxyProfileNames = {
+  hosted: 'Hosted', paypal: 'PayPal', ideal: 'iDEAL', upi: 'UPI', pix: 'PIX', gopay: 'Gopay'
+};
+const proxyProfileRails = Object.keys(proxyProfileNames);
+let activeProxyRail = '';
+let proxyProfiles = {};
+let defaultProxyProfile = {entry: '', exit: ''};
+let proxyInputDirty = false;
+let billingProfiles = {};
+let activeBillingProfileKey = '';
+let billingSaveTimer = 0;
+let billingInputDirty = false;
+let proxyAsnRecommendations = {};
 
 const providerDefaults = {
   hosted: {country: 'US', currency: 'USD'}, paypal: {country: 'US', currency: 'USD'},
   ideal: {country: 'NL', currency: 'EUR'}, upi: {country: 'IN', currency: 'INR'},
-  pix: {country: 'BR', currency: 'BRL'}
+  pix: {country: 'BR', currency: 'BRL'}, gopay: {country: 'ID', currency: 'IDR'}
 };
-const countryCurrency = {US:'USD',DE:'EUR',FR:'EUR',NL:'EUR',IN:'INR',BR:'BRL',GB:'GBP',JP:'JPY',AU:'AUD',CA:'CAD'};
+const countryCurrency = {US:'USD',DE:'EUR',FR:'EUR',NL:'EUR',IN:'INR',BR:'BRL',GB:'GBP',JP:'JPY',AU:'AUD',CA:'CAD',ID:'IDR'};
 
 function proxyLines(node){
   return node.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
@@ -73,28 +134,397 @@ function setProxySaveState(text, failed=false){
   node.textContent = text;
   node.classList.toggle('save-failed', failed);
 }
-function saveProxyPools(){
+
+function emptyProxyProfile(){ return {entry: '', exit: ''}; }
+function cloneProxyProfile(raw){
+  return {entry: String(raw?.entry ?? ''), exit: String(raw?.exit ?? '')};
+}
+function hasProxyProfile(rail){
+  return Object.prototype.hasOwnProperty.call(proxyProfiles, rail);
+}
+function proxyProfileHasContent(profile){
+  return Boolean(String(profile?.entry || '').trim() || String(profile?.exit || '').trim());
+}
+function readProxyProfile(){
+  return {entry: $('entryProxy').value, exit: $('exitProxy').value};
+}
+function proxyProfileForRail(rail){
+  return hasProxyProfile(rail) ? cloneProxyProfile(proxyProfiles[rail]) : cloneProxyProfile(defaultProxyProfile);
+}
+function persistProxyProfiles(){
+  const profiles = {};
+  proxyProfileRails.forEach(rail => {
+    if (hasProxyProfile(rail)) profiles[rail] = cloneProxyProfile(proxyProfiles[rail]);
+  });
+  localStorage.setItem(PROXY_STORAGE_KEYS.profiles, JSON.stringify({
+    version: 1,
+    default: cloneProxyProfile(defaultProxyProfile),
+    profiles
+  }));
+}
+function updateProxyProfileState(rail=activeProxyRail){
+  if (!rail || !$('proxyProfileState')) return;
+  const explicit = hasProxyProfile(rail);
+  const label = proxyProfileNames[rail] || rail;
+  $('proxyProfileState').textContent = `${label} · ${explicit ? '专属配置' : '默认共享'}`;
+  $('proxyProfileState').title = explicit
+    ? '当前支付方式使用自己的代理池配置，切换方式时会自动保存和恢复。'
+    : '当前支付方式继承默认共享代理池，编辑后会保存为该方式专属配置。';
+}
+function applyProxyProfile(rail){
+  const profile = proxyProfileForRail(rail);
+  $('entryProxy').value = profile.entry;
+  $('exitProxy').value = profile.exit;
+  proxyInputDirty = false;
+  updateProxyCount($('entryProxy'), $('entryProxyCount'));
+  updateProxyCount($('exitProxy'), $('exitProxyCount'));
+  updateProxyProfileState(rail);
+}
+function saveActiveProxyProfile(){
+  if (!activeProxyRail || !proxyInputDirty) return false;
+  const profile = readProxyProfile();
+  if (!proxyProfileHasContent(defaultProxyProfile) && !Object.keys(proxyProfiles).length && proxyProfileHasContent(profile)) {
+    defaultProxyProfile = cloneProxyProfile(profile);
+  }
+  proxyProfiles[activeProxyRail] = profile;
+  proxyInputDirty = false;
+  persistProxyProfiles();
+  updateProxyProfileState();
+  return true;
+}
+function scheduleProxyProfileSave(){
   clearTimeout(proxySaveTimer);
   proxySaveTimer = setTimeout(() => {
     try {
-      localStorage.setItem(PROXY_STORAGE_KEYS.entry, $('entryProxy').value);
-      localStorage.setItem(PROXY_STORAGE_KEYS.exit, $('exitProxy').value);
-      setProxySaveState('已保存到本机');
+      saveActiveProxyProfile();
+      setProxySaveState('已保存当前方式');
     } catch (error) {
       setProxySaveState('本地保存失败', true);
     }
   }, 220);
 }
-function restoreProxyPools(){
+function saveProxyPools(){
+  proxyInputDirty = true;
+  scheduleProxyProfileSave();
+}
+function switchProxyProfile(rail){
+  if (!rail || rail === activeProxyRail) return;
+  clearTimeout(proxySaveTimer);
+  saveActiveProxyProfile();
+  activeProxyRail = rail;
+  applyProxyProfile(rail);
+  setProxySaveState(hasProxyProfile(rail) ? '已恢复方式专属配置' : '已恢复默认共享');
+}
+function saveCurrentAsDefault(){
+  clearTimeout(proxySaveTimer);
   try {
-    const entry = localStorage.getItem(PROXY_STORAGE_KEYS.entry);
-    const exit = localStorage.getItem(PROXY_STORAGE_KEYS.exit);
-    if (entry !== null) $('entryProxy').value = entry;
-    if (exit !== null) $('exitProxy').value = exit;
-    setProxySaveState(entry !== null || exit !== null ? '已恢复本地代理' : '本地自动保存');
+    defaultProxyProfile = readProxyProfile();
+    if (activeProxyRail) delete proxyProfiles[activeProxyRail];
+    proxyInputDirty = false;
+    persistProxyProfiles();
+    updateProxyProfileState();
+    setProxySaveState('默认共享配置已更新');
   } catch (error) {
     setProxySaveState('本地保存不可用', true);
   }
+}
+function loadProxyProfiles(){
+  proxyProfiles = {};
+  defaultProxyProfile = emptyProxyProfile();
+  let loadedProfiles = false;
+  try {
+    const raw = localStorage.getItem(PROXY_STORAGE_KEYS.profiles);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.version === 1) {
+        defaultProxyProfile = cloneProxyProfile(parsed.default);
+        const savedProfiles = parsed.profiles && typeof parsed.profiles === 'object' ? parsed.profiles : {};
+        proxyProfileRails.forEach(rail => {
+          if (savedProfiles[rail] && typeof savedProfiles[rail] === 'object') {
+            proxyProfiles[rail] = cloneProxyProfile(savedProfiles[rail]);
+          }
+        });
+        loadedProfiles = true;
+      }
+    }
+    if (!loadedProfiles) {
+      const legacy = {
+        entry: localStorage.getItem(PROXY_STORAGE_KEYS.legacyEntry) || '',
+        exit: localStorage.getItem(PROXY_STORAGE_KEYS.legacyExit) || ''
+      };
+      if (proxyProfileHasContent(legacy)) {
+        defaultProxyProfile = legacy;
+        persistProxyProfiles();
+        setProxySaveState('已迁移默认代理配置');
+        return;
+      }
+    }
+    setProxySaveState(loadedProfiles ? '已恢复代理配置' : '本地自动保存');
+  } catch (error) {
+    setProxySaveState('本地保存不可用', true);
+  }
+}
+function initializeProxyProfiles(){
+  loadProxyProfiles();
+  activeProxyRail = selected('link_type');
+  applyProxyProfile(activeProxyRail);
+}
+
+function normalizeProxyAsn(raw){
+  const match = String(raw ?? '').trim().toUpperCase().match(/^AS?(\d{1,10})$/);
+  return match ? `AS${match[1]}` : '';
+}
+function cloneProxyAsnRecommendation(raw){
+  const items = Array.isArray(raw?.items) ? raw.items.map(item => {
+    const asn = normalizeProxyAsn(item?.asn);
+    if (!asn) return null;
+    return {
+      asn,
+      provider: String(item?.provider ?? '').trim().slice(0, 80),
+      tier: ['A', 'B', 'C'].includes(String(item?.tier || '').toUpperCase()) ? String(item.tier).toUpperCase() : 'B',
+      note: String(item?.note ?? '').trim().slice(0, 160)
+    };
+  }).filter(Boolean) : [];
+  const uniqueItems = [];
+  const seen = new Set();
+  items.forEach(item => {
+    if (seen.has(item.asn)) return;
+    seen.add(item.asn);
+    uniqueItems.push(item);
+  });
+  return {
+    label: String(raw?.label ?? '').trim().slice(0, 80),
+    items: uniqueItems
+  };
+}
+function persistProxyAsnRecommendations(){
+  const regions = {};
+  Object.entries(proxyAsnRecommendations).forEach(([country, value]) => {
+    const normalizedCountry = String(country || '').trim().toUpperCase();
+    const normalized = cloneProxyAsnRecommendation(value);
+    if (/^[A-Z]{2}$/.test(normalizedCountry) && normalized.items.length) {
+      regions[normalizedCountry] = normalized;
+    }
+  });
+  localStorage.setItem(PROXY_ASN_RECOMMENDATION_STORAGE_KEY, JSON.stringify({version: 1, regions}));
+}
+function setProxyAsnSaveState(text, failed=false){
+  const node = $('proxyAsnSaveState');
+  if (!node) return;
+  node.textContent = text;
+  node.classList.toggle('save-failed', failed);
+}
+function loadProxyAsnRecommendations(){
+  proxyAsnRecommendations = {};
+  let hadStoredConfig = false;
+  try {
+    const raw = localStorage.getItem(PROXY_ASN_RECOMMENDATION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed?.version === 1 && parsed.regions && typeof parsed.regions === 'object') {
+      Object.entries(parsed.regions).forEach(([country, value]) => {
+        const normalizedCountry = String(country || '').trim().toUpperCase();
+        const normalized = cloneProxyAsnRecommendation(value);
+        if (/^[A-Z]{2}$/.test(normalizedCountry) && normalized.items.length) {
+          proxyAsnRecommendations[normalizedCountry] = normalized;
+        }
+      });
+      hadStoredConfig = Object.keys(proxyAsnRecommendations).length > 0;
+    }
+    Object.entries(DEFAULT_PROXY_ASN_RECOMMENDATIONS).forEach(([country, value]) => {
+      if (!Object.prototype.hasOwnProperty.call(proxyAsnRecommendations, country)) {
+        proxyAsnRecommendations[country] = cloneProxyAsnRecommendation(value);
+      }
+    });
+    persistProxyAsnRecommendations();
+    setProxyAsnSaveState(hadStoredConfig ? '已恢复本地顺序' : '已保存本地顺序');
+  } catch (error) {
+    Object.entries(DEFAULT_PROXY_ASN_RECOMMENDATIONS).forEach(([country, value]) => {
+      proxyAsnRecommendations[country] = cloneProxyAsnRecommendation(value);
+    });
+    setProxyAsnSaveState('本地保存不可用', true);
+  }
+}
+function renderProxyAsnRecommendations(){
+  const list = $('proxyAsnList');
+  const hint = $('proxyAsnRecommendationHint');
+  const note = $('proxyAsnRecommendationNote');
+  if (!list || !hint || !note) return;
+  const country = String($('country')?.value || '').trim().toUpperCase();
+  const recommendation = proxyAsnRecommendations[country];
+  list.replaceChildren();
+  if (!recommendation?.items?.length) {
+    hint.textContent = `${country || '当前地区'} · 暂无本地 ASN 推荐顺序`;
+    const empty = document.createElement('li');
+    empty.className = 'proxy-asn-empty';
+    empty.textContent = '后续可按国家/地区继续加入推荐顺序。';
+    list.appendChild(empty);
+    note.textContent = '当前只保存英国 GB 推荐顺序；本地配置不会修改代理池内容。';
+    return;
+  }
+  hint.textContent = `${country} · ${recommendation.label} · 共 ${recommendation.items.length} 个候选`;
+  recommendation.items.forEach((item, index) => {
+    const row = document.createElement('li');
+    row.className = `proxy-asn-item tier-${item.tier.toLowerCase()}`;
+    const rank = document.createElement('span');
+    rank.className = 'proxy-asn-rank';
+    rank.textContent = String(index + 1);
+    const asn = document.createElement('code');
+    asn.textContent = item.asn;
+    const detail = document.createElement('span');
+    detail.className = 'proxy-asn-detail';
+    const provider = document.createElement('b');
+    provider.textContent = item.provider || '未命名网络';
+    const itemNote = document.createElement('small');
+    itemNote.textContent = item.note;
+    detail.append(provider, itemNote);
+    row.append(rank, asn, detail);
+    list.appendChild(row);
+  });
+  note.textContent = '按 ASN 画像保存为选择参考；不会自动把代理池中的实际 IP 重排，也不代表每个 IP 都同样干净。';
+}
+function initializeProxyAsnRecommendations(){
+  loadProxyAsnRecommendations();
+  renderProxyAsnRecommendations();
+}
+
+function emptyBillingProfile(){
+  return {country: '', name: '', email: '', line1: '', line2: '', city: '', state: '', postal_code: ''};
+}
+function cloneBillingProfile(raw){
+  const profile = emptyBillingProfile();
+  if (!raw || typeof raw !== 'object') return profile;
+  profile.country = String(raw.country ?? '').trim().toUpperCase();
+  BILLING_PROFILE_FIELDS.forEach(field => { profile[field] = String(raw[field] ?? ''); });
+  return profile;
+}
+function billingProfileKey(rail=selected('link_type'), country=$('country')?.value){
+  return `${rail || 'hosted'}:${String(country || 'US').toUpperCase()}`;
+}
+function billingProfileHasContent(profile){
+  return BILLING_PROFILE_FIELDS.some(field => String(profile?.[field] || '').trim());
+}
+function readBillingProfile(){
+  const profile = emptyBillingProfile();
+  profile.country = String($('country')?.value || '').toUpperCase();
+  BILLING_PROFILE_FIELDS.forEach(field => {
+    const node = $(`billing${field === 'postal_code' ? 'PostalCode' : field[0].toUpperCase() + field.slice(1)}`);
+    if (node) profile[field] = node.value;
+  });
+  return profile;
+}
+function persistBillingProfiles(){
+  const profiles = {};
+  Object.entries(billingProfiles).forEach(([key, value]) => {
+    if (billingProfileHasContent(value)) profiles[key] = cloneBillingProfile(value);
+  });
+  localStorage.setItem(BILLING_STORAGE_KEY, JSON.stringify({version: 1, profiles}));
+}
+function setBillingSaveState(text, failed=false){
+  const node = $('billingSaveState');
+  if (!node) return;
+  node.textContent = text;
+  node.classList.toggle('save-failed', failed);
+}
+function updateBillingProfileState(){
+  const block = $('billingBlock');
+  if (!block) return;
+  const key = billingProfileKey();
+  activeBillingProfileKey = key;
+  const explicit = billingProfileHasContent(billingProfiles[key]);
+  const rail = selected('link_type');
+  const country = String($('country')?.value || '').toUpperCase();
+  const option = $('country')?.selectedOptions?.[0];
+  const countryLabel = option ? option.textContent.trim() : country;
+  $('billingCountry').textContent = `${countryLabel || country}`;
+  $('billingProfileState').textContent = explicit ? `${country} · 已配置` : `${country} · 待填写`;
+  $('billingProfileState').title = explicit
+    ? '当前支付方式已保存账单档案，提交时会使用该档案。'
+    : '当前支付方式尚未保存账单档案。';
+  $('billingRequiredTag').hidden = rail !== 'gopay';
+  block.classList.toggle('billing-missing', rail === 'gopay' && !explicit);
+  $('billingFootHint').textContent = explicit
+    ? `已恢复 ${key} 档案；编辑后自动保存。`
+    : `尚未配置 ${key} 档案；Gopay 需要先填写。`;
+}
+function applyBillingProfile(){
+  const key = billingProfileKey();
+  activeBillingProfileKey = key;
+  const profile = cloneBillingProfile(billingProfiles[key]);
+  const fieldNodes = {
+    name: $('billingName'), email: $('billingEmail'), line1: $('billingLine1'),
+    line2: $('billingLine2'), city: $('billingCity'), state: $('billingState'),
+    postal_code: $('billingPostalCode')
+  };
+  Object.entries(fieldNodes).forEach(([field, node]) => { if (node) node.value = profile[field] || ''; });
+  billingInputDirty = false;
+  updateBillingProfileState();
+}
+function saveBillingProfile(){
+  if (!activeBillingProfileKey) activeBillingProfileKey = billingProfileKey();
+  const profile = readBillingProfile();
+  if (billingProfileHasContent(profile)) billingProfiles[activeBillingProfileKey] = profile;
+  else delete billingProfiles[activeBillingProfileKey];
+  billingInputDirty = false;
+  persistBillingProfiles();
+  updateBillingProfileState();
+  setBillingSaveState('已保存当前账单档案');
+}
+function scheduleBillingProfileSave(){
+  clearTimeout(billingSaveTimer);
+  billingSaveTimer = setTimeout(() => {
+    if (!billingInputDirty) return;
+    try { saveBillingProfile(); }
+    catch (error) { setBillingSaveState('本地保存失败', true); }
+  }, 220);
+}
+function saveBillingInputs(){
+  billingInputDirty = true;
+  updateBillingProfileState();
+  scheduleBillingProfileSave();
+}
+function clearBillingProfile(){
+  clearTimeout(billingSaveTimer);
+  delete billingProfiles[billingProfileKey()];
+  billingInputDirty = false;
+  try {
+    persistBillingProfiles();
+    applyBillingProfile();
+    setBillingSaveState('当前档案已清空');
+  } catch (error) { setBillingSaveState('本地保存失败', true); }
+}
+function loadBillingProfiles(){
+  billingProfiles = {};
+  try {
+    const raw = localStorage.getItem(BILLING_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed?.version !== 1 || !parsed.profiles || typeof parsed.profiles !== 'object') {
+      setBillingSaveState('本地自动保存');
+      return;
+    }
+    Object.entries(parsed.profiles).forEach(([key, value]) => {
+      const profile = cloneBillingProfile(value);
+      if (billingProfileHasContent(profile)) billingProfiles[key] = profile;
+    });
+    setBillingSaveState('已恢复账单档案');
+  } catch (error) { setBillingSaveState('本地保存不可用', true); }
+}
+function initializeBillingProfiles(){
+  loadBillingProfiles();
+  applyBillingProfile();
+}
+function syncBillingFields(){
+  const rail = selected('link_type');
+  const visible = rail === 'gopay';
+  $('billingBlock').hidden = !visible;
+  ['billingName', 'billingLine1', 'billingCity', 'billingPostalCode'].forEach(id => {
+    $(id).required = visible;
+  });
+  if (visible) applyBillingProfile();
+  else $('billingBlock').classList.remove('billing-missing');
+}
+function billingProfileMissing(profile){
+  const labels = {name: '账单姓名', line1: '地址第一行', city: '城市', postal_code: '邮编'};
+  return Object.entries(labels).filter(([field]) => !String(profile?.[field] || '').trim()).map(([, label]) => label);
 }
 
 function selected(name){ return form.querySelector(`input[name="${name}"]:checked`)?.value || ''; }
@@ -110,6 +540,7 @@ bindChoices($('railGrid'), () => syncFields(true));
 
 function syncFields(applyRailDefault=false){
   const plan = selected('plan'), rail = selected('link_type');
+  if (activeProxyRail && rail !== activeProxyRail) switchProxyProfile(rail);
   $('teamFields').hidden = plan !== 'team';
   $('codexFields').hidden = plan !== 'codex_low';
   $('idealOptions').hidden = rail !== 'ideal';
@@ -131,9 +562,10 @@ function syncFields(applyRailDefault=false){
     paypal: '\u63a8\u8350\u4ee3\u7406\uff1a\u7cfb\u7edf\u4f18\u5148\u4f7f\u7528\u4ee3\u7406\u6c60 2 \u5f53\u524d\u56fd\u5bb6\u7684 PayPal \u8d26\u5355\uff1b\u82e5\u8be5\u56fd\u5bb6 Checkout \u672a\u5f00\u653e PayPal\uff0c\u5219\u81ea\u52a8\u56de\u9000\u5fb7\u56fd DE/EUR \u8d26\u5355\u3002',
     ideal: '推荐代理：两个代理池均使用 NL。',
     upi: '推荐代理：代理池 1 使用可获得优惠资格的国家或地区（如 TR、JP、BR），代理池 2 使用 IN 创建并处理 UPI。',
-    pix: '推荐代理：代理池 1 使用 BR。'
+    pix: '推荐代理：代理池 1 使用 BR。',
+    gopay: '推荐代理：代理池 1 使用 TH（泰国）更新优惠，代理池 2 使用 ID（印尼）创建并处理 Gopay。'
   };
-  const pool2Hints = {paypal:'巴西 PayPal 推荐 BR',ideal:'推荐 NL',upi:'推荐 IN'};
+  const pool2Hints = {paypal:'巴西 PayPal 推荐 BR',ideal:'推荐 NL',upi:'推荐 IN',gopay:'推荐 ID'};
   const recommendation = recommendations[rail] || '推荐代理：使用与所选地区一致的代理。';
   $('proxyRecommendation').textContent = recommendation;
   $('proxyFootHint').textContent = recommendation;
@@ -142,13 +574,23 @@ function syncFields(applyRailDefault=false){
     $('country').value = providerDefaults[rail].country;
     $('currency').value = providerDefaults[rail].currency;
   }
+  renderProxyAsnRecommendations();
+  syncBillingFields();
 }
-$('country').addEventListener('change', () => $('currency').value = countryCurrency[$('country').value] || 'USD');
+$('country').addEventListener('change', () => {
+  $('currency').value = countryCurrency[$('country').value] || 'USD';
+  renderProxyAsnRecommendations();
+  syncBillingFields();
+});
 $('usePromo').addEventListener('change', () => syncFields(false));
 $('entryProxy').addEventListener('input', () => { updateProxyCount($('entryProxy'), $('entryProxyCount')); saveProxyPools(); });
 $('exitProxy').addEventListener('input', () => { updateProxyCount($('exitProxy'), $('exitProxyCount')); saveProxyPools(); });
 $('probeEntryProxy').addEventListener('click', () => probeProxyPool('entryProxy', 'probeEntryProxy', 'entryProxyProbe', '代理池 1'));
 $('probeExitProxy').addEventListener('click', () => probeProxyPool('exitProxy', 'probeExitProxy', 'exitProxyProbe', '代理池 2'));
+$('saveProxyDefault').addEventListener('click', saveCurrentAsDefault);
+$('clearBillingProfile').addEventListener('click', clearBillingProfile);
+['billingName', 'billingEmail', 'billingLine1', 'billingLine2', 'billingCity', 'billingState', 'billingPostalCode']
+  .forEach(id => $(id).addEventListener('input', saveBillingInputs));
 $('copyEntryProxy').addEventListener('click', () => {
   $('exitProxy').value = $('entryProxy').value.trim();
   updateProxyCount($('exitProxy'), $('exitProxyCount'));
@@ -274,12 +716,27 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault(); $('resultPanel').hidden = true; $('logBox').innerHTML = '<div class="empty-log">正在创建任务…</div>';
   renderedLogKey = '';
   logAutoFollow = true;
+  const plan = selected('plan');
+  const linkType = selected('link_type');
+  const billingProfile = readBillingProfile();
+  if (linkType === 'gopay') {
+    const missing = billingProfileMissing(billingProfile);
+    if (missing.length) {
+      $('billingBlock').hidden = false;
+      updateBillingProfileState();
+      setBillingSaveState('账单档案未完成', true);
+      setProgress(100, `Gopay 账单档案缺少：${missing.join('、')}`, 'error');
+      const firstMissing = {name: 'billingName', line1: 'billingLine1', city: 'billingCity', postal_code: 'billingPostalCode'};
+      $(firstMissing[Object.keys(firstMissing).find(field => !String(billingProfile[field] || '').trim())] || 'billingName')?.focus();
+      return;
+    }
+  }
   resetProgress();
   setRunning(true); setProgress(3, '提交任务', 'running');
-  const plan = selected('plan');
   const body = {
-    token: $('token').value, plan, link_type: selected('link_type'), country: $('country').value,
+    token: $('token').value, plan, link_type: linkType, country: $('country').value,
     currency: $('currency').value, entry_proxies: proxyLines($('entryProxy')), exit_proxies: proxyLines($('exitProxy')),
+    billing_profile: billingProfileHasContent(billingProfile) ? billingProfile : null,
     retry_count: Math.max(1, Math.min(50, Number($('retryCount').value || 10))),
     use_promo: plan === 'plus' && $('usePromo').checked,
     promo_campaign: plan === 'plus' ? $('promoCampaign').value.trim() : '',
@@ -320,7 +777,7 @@ const requestedTheme = new URLSearchParams(location.search).get('theme');
 const saved=localStorage.getItem('pay153-theme');
 applyTheme(requestedTheme ? requestedTheme === 'dark' : (saved ? saved==='dark' : matchMedia('(prefers-color-scheme: dark)').matches));
 $('themeToggle').addEventListener('click',()=>applyTheme(!document.documentElement.classList.contains('dark')));
+initializeProxyAsnRecommendations();
+initializeBillingProfiles();
+initializeProxyProfiles();
 syncFields(true);
-restoreProxyPools();
-updateProxyCount($('entryProxy'), $('entryProxyCount'));
-updateProxyCount($('exitProxy'), $('exitProxyCount'));

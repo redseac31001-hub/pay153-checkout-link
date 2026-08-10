@@ -594,6 +594,7 @@ def snapshot_billing(chatgpt_http, access_token: str, session_id: str, processor
                 "name": billing.get("name", ""),
                 "address": {
                     "line1": addr.get("line1", ""),
+                    "line2": addr.get("line2", ""),
                     "city": addr.get("city", ""),
                     "country": addr.get("country", "US"),
                     "postal_code": addr.get("postal_code", ""),

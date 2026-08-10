@@ -20,6 +20,7 @@ PROVIDER_DEFAULTS = {
     "ideal": {"country": "NL", "currency": "EUR"},
     "upi": {"country": "IN", "currency": "INR"},
     "pix": {"country": "BR", "currency": "BRL"},
+    "gopay": {"country": "ID", "currency": "IDR"},
 }
 
 # PIX Automático / UPI AutoPay mandate_options were added after the Checkout
@@ -288,8 +289,92 @@ def flatten_stripe_params(value: Any, prefix: str = "") -> dict[str, str]:
     return out
 
 
-def default_billing(country: str, email: str = "", tax_id: str = "", geo: dict[str, str] | None = None, real_random: bool = False) -> dict[str, Any]:
+def normalize_billing_profile(
+    raw: dict[str, Any] | None,
+    country: str,
+    *,
+    require_complete: bool = False,
+) -> dict[str, str]:
+    """Normalize a user-maintained, country-bound billing profile.
+
+    Billing addresses must come from a profile the operator is authorized to
+    use.  This seam deliberately does not invent a public address when a
+    profile is missing or incomplete.
+    """
+    expected_country = str(country or "US").strip().upper()
+    if not isinstance(raw, dict):
+        if require_complete:
+            raise ValueError(f"{expected_country} 账单地址档案未填写")
+        return {}
+    limits = {
+        "name": 160,
+        "email": 200,
+        "line1": 180,
+        "line2": 180,
+        "city": 100,
+        "state": 80,
+        "postal_code": 30,
+    }
+    profile = {
+        key: str(raw.get(key) or "").strip()[:limit]
+        for key, limit in limits.items()
+    }
+    profile_country = str(raw.get("country") or expected_country).strip().upper()
+    if profile_country != expected_country:
+        raise ValueError(
+            f"账单档案国家 {profile_country or '未知'} 与 Checkout 国家 {expected_country} 不一致"
+        )
+    profile["country"] = profile_country
+    if require_complete:
+        labels = {
+            "name": "姓名",
+            "line1": "地址",
+            "city": "城市",
+            "postal_code": "邮编",
+        }
+        missing = [label for key, label in labels.items() if not profile.get(key)]
+        if missing:
+            raise ValueError(f"{expected_country} 账单地址档案缺少：{'、'.join(missing)}")
+    return profile
+
+
+def default_billing(
+    country: str,
+    email: str = "",
+    tax_id: str = "",
+    geo: dict[str, str] | None = None,
+    real_random: bool = False,
+    billing_profile: dict[str, Any] | None = None,
+    require_profile: bool = False,
+) -> dict[str, Any]:
     country = (country or "US").upper()
+    if billing_profile is not None or require_profile:
+        profile = normalize_billing_profile(
+            billing_profile,
+            country,
+            require_complete=require_profile,
+        )
+        resolved_email = profile.get("email") or str(email or "").strip()
+        if require_profile and not resolved_email:
+            raise ValueError(f"{country} 账单地址档案缺少邮箱，且 Access Token 未解析出账号邮箱")
+        billing = {
+            "name": profile.get("name", ""),
+            "email": resolved_email or f"checkout-{uuid.uuid4().hex[:10]}@outlook.com",
+            "address": {
+                "country": country,
+                "line1": profile.get("line1", ""),
+                "line2": profile.get("line2", ""),
+                "city": profile.get("city", ""),
+                "postal_code": profile.get("postal_code", ""),
+                "state": profile.get("state", ""),
+            },
+        }
+        billing["_address_source"] = "manual_profile"
+        if tax_id:
+            billing["tax_id"] = re.sub(r"\D", "", tax_id)
+        return billing
+    if require_profile:
+        raise ValueError(f"{country} 账单地址档案未填写")
     rows = {
         "DE": ("Alex Meyer", "Friedrichstrasse 100", "Berlin", "10117", "BE"),
         "NL": ("Lars de Vries", "Damrak 1", "Amsterdam", "1012LG", "NH"),
@@ -711,6 +796,7 @@ def confirm_provider_payment(
         "payment_method_data[billing_details][email]": billing.get("email", ""),
         "payment_method_data[billing_details][address][country]": addr.get("country", "US"),
         "payment_method_data[billing_details][address][line1]": addr.get("line1", ""),
+        "payment_method_data[billing_details][address][line2]": addr.get("line2", ""),
         "payment_method_data[billing_details][address][city]": addr.get("city", ""),
         "payment_method_data[billing_details][address][postal_code]": addr.get("postal_code", ""),
         "payment_method_data[payment_user_agent]": (
@@ -1216,7 +1302,7 @@ def stripe_to_provider(
 
             setup_status = str(((confirm.get("setup_intent") or {}).get("status") or "")).lower()
             need_setup_recover = (
-                provider in {"upi", "pix"}
+                provider in {"upi", "pix", "gopay"}
                 and not out.get("provider_redirect_url")
                 and not out.get("qr_image_png")
                 and not out.get("qr_data")
@@ -1247,10 +1333,11 @@ def stripe_to_provider(
                 failure_detail = provider_failure_detail(confirm)
                 if failure_detail:
                     log(f"[{provider}] SetupIntent 补交后详情：{failure_detail}")
-            if decline and provider == "pix" and not (
+            if decline and provider in {"pix", "gopay"} and not (
                 out.get("provider_redirect_url") or out.get("qr_image_png") or out.get("qr_data")
             ):
-                log("[pix] approval 后原始 PaymentMethod 被支付通道拒绝，交给外层更换代理、CPF 并重建完整链路")
+                label = "PIX" if provider == "pix" else "Gopay"
+                log(f"[{provider}] approval 后原始 PaymentMethod 被支付通道拒绝，交给外层更换代理并重建完整链路")
     out.update({
         "payment_method_types": ctx.get("payment_method_types") or methods,
         "processor_entity": processor,

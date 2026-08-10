@@ -21,7 +21,12 @@ from flask import Flask, jsonify, request, send_from_directory
 from curl_cffi import requests
 
 import stripe_checkout as sc
-from provider_checkout import PROVIDER_DEFAULTS, default_billing, stripe_to_provider
+from provider_checkout import (
+    PROVIDER_DEFAULTS,
+    default_billing,
+    normalize_billing_profile,
+    stripe_to_provider,
+)
 from sentinel_token import SentinelTokenProvider as BaseSentinel
 
 # 加载 .env 文件中的环境变量
@@ -604,7 +609,7 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
             "auto_top_up_enabled": True,
         }
     elif plan == "plus" and options.get("use_promo") and (
-        options.get("link_type") not in {"pix", "paypal", "upi", "ideal"}
+        options.get("link_type") not in {"pix", "paypal", "upi", "ideal", "gopay"}
         or options.get("promo_on_create")
     ):
         common["promo_campaign"] = {
@@ -1352,6 +1357,12 @@ class JobStore:
                 self.log(job_id, f"代理池共 {len(entry_pool)} 条，本次已自动选择 1 条")
             elif provider == "pix":
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，本次已自动选择 1 条")
+            elif provider == "gopay":
+                self.log(
+                    job_id,
+                    f"代理池 1（优惠更新）共 {len(entry_pool)} 条，"
+                    f"代理池 2（印尼支付）共 {len(exit_pool)} 条，本次已分别自动选择",
+                )
             else:
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，代理池 2 共 {len(exit_pool)} 条，本次已分别自动选择")
             self.log(
@@ -1439,6 +1450,21 @@ class JobStore:
                         f"iDEAL 支付代理出口为 {payment_country or '未知'}，需要 NL 荷兰出口"
                     )
                 self.ensure_not_cancelled(job_id)
+            if provider == "gopay":
+                self.update(job_id, percent=9, text="校验 Gopay 优惠更新与支付代理")
+                promo_country, promo_region = proxy_country(entry_proxy)
+                payment_country, payment_region = proxy_country(exit_proxy)
+                main_country, main_region = promo_country, promo_region
+                self.log(
+                    job_id,
+                    f"Gopay 代理校验：优惠更新={promo_country}/{promo_region}，"
+                    f"支付 Checkout={payment_country}/{payment_region}，账单=ID/IDR",
+                )
+                if promo_country != "TH":
+                    self.log(job_id, f"Gopay 优惠更新代理当前为 {promo_country or '?'}；不限制国家，继续尝试")
+                if payment_country != "ID":
+                    self.log(job_id, f"Gopay 支付代理当前为 {payment_country or '?'}；不限制国家，继续由上游判断支付方式")
+                self.ensure_not_cancelled(job_id)
             preflight = {}
             if promo_requested:
                 self.update(job_id, percent=12, text="读取入口支付与活动标记")
@@ -1465,11 +1491,13 @@ class JobStore:
                 (f"第 2/7 步：使用 {country} 代理创建 PayPal Checkout"
                  + ("（原生携带优惠）" if options.get("promo_on_create") else "（稍后更新优惠）"))
                 if provider == "paypal" and promo_requested else (
-                    "第 2/7 步：使用 IN 代理创建 UPI Checkout" if provider == "upi" else "创建 OpenAI Checkout"
+                    "第 2/7 步：使用 IN 代理创建 UPI Checkout" if provider == "upi" else (
+                        "第 2/7 步：使用印尼 IP 创建 Gopay Checkout（稍后通过代理池 1 更新优惠）" if provider == "gopay" else "创建 OpenAI Checkout"
+                    )
                 )
             )
             self.update(job_id, percent=34, text=stage2_text)
-            checkout_proxy = exit_proxy if provider in {"paypal", "upi", "ideal"} else entry_proxy
+            checkout_proxy = exit_proxy if provider in {"paypal", "upi", "ideal", "gopay"} else entry_proxy
             if provider == "pix":
                 self.log(
                     job_id,
@@ -1482,6 +1510,8 @@ class JobStore:
                 self.log(job_id, "UPI 设置：代理池 1 用于优惠检查，代理池 2 创建 IN/INR Checkout")
             elif provider == "ideal":
                 self.log(job_id, "iDEAL 设置：代理池 2 创建 NL/EUR Checkout，并贯穿 Stripe 支付处理")
+            elif provider == "gopay":
+                self.log(job_id, "Gopay 设置：代理池 1（TH）仅用于优惠更新，代理池 2（ID）创建 ID/IDR Checkout 并贯穿 Stripe 支付处理")
             elif provider != "hosted":
                 self.log(job_id, f"Checkout 将使用所选的 {country} 地区代理")
             created = create_checkout(token, payload, checkout_proxy, device_id, did, lambda m: self.log(job_id, m))
@@ -1498,7 +1528,7 @@ class JobStore:
                 self.log(job_id, f"Checkout 已返回活动标识：{stage1_campaign}")
             provider_chatgpt_http = chatgpt_http
             promo_chatgpt_http = chatgpt_http
-            if provider in {"paypal", "upi", "ideal"}:
+            if provider in {"paypal", "upi", "ideal", "gopay"}:
                 promo_chatgpt_http = sc.build_http(entry_proxy)
                 try:
                     promo_chatgpt_http.cookies.set("oai-did", did, domain="chatgpt.com")
@@ -1511,6 +1541,8 @@ class JobStore:
                     self.log(job_id, f"PayPal 支付处理使用代理池 2（{country}）")
                 elif provider == "upi":
                     self.log(job_id, "UPI 支付处理使用代理池 2（IN）")
+                elif provider == "gopay":
+                    self.log(job_id, "Gopay 优惠更新使用代理池 1（TH），支付处理使用代理池 2（ID）")
                 else:
                     self.log(job_id, "iDEAL 优惠更新使用代理池 1，NL/EUR Checkout 与 Stripe 使用代理池 2")
             session_id = checkout_data.get("checkout_session_id") or ""
@@ -1792,7 +1824,21 @@ class JobStore:
                 options.get("pix_tax_id") or "",
                 billing_geo,
                 real_random=(provider == "paypal"),
+                billing_profile=options.get("billing_profile") or None,
+                require_profile=provider == "gopay",
             )
+            if billing.get("_address_source") == "manual_profile":
+                selected_address = billing.get("address") or {}
+                self.log(
+                    job_id,
+                    "账单档案：source=manual_profile country={} city={} state={} postal={} line1={}".format(
+                        selected_address.get("country") or "-",
+                        selected_address.get("city") or "-",
+                        selected_address.get("state") or "-",
+                        selected_address.get("postal_code") or "-",
+                        selected_address.get("line1") or "-",
+                    ),
+                )
             if provider == "paypal":
                 selected_address = billing.get("address") or {}
                 self.log(
@@ -1913,6 +1959,8 @@ class JobStore:
                     self.log(job_id, "UPI 已确认可用，正在应用优惠")
                 elif provider == "ideal":
                     self.log(job_id, "iDEAL 已确认可用，正在通过代理池 1 提交优惠；最终以 Stripe 今日应付金额为准")
+                elif provider == "gopay":
+                    self.log(job_id, "Gopay 已确认可用，正在通过代理池 1 提交优惠")
                 advance_progress(70, "正在应用优惠")
                 campaign = options.get("promo_campaign") or "plus-1-month-free"
                 response = update_checkout_promo(
@@ -1947,7 +1995,7 @@ class JobStore:
                 approve_callback=None if provider == "paypal" else approve_cb,
                 apply_promo_callback=(
                     apply_promo_cb
-                    if provider in {"pix", "paypal", "upi", "ideal"}
+                    if provider in {"pix", "paypal", "upi", "ideal", "gopay"}
                     and promo_requested
                     and not options.get("promo_preapplied")
                     else None
@@ -1967,8 +2015,28 @@ class JobStore:
                 result["currency"] = str(provider_result["checkout_currency"]).upper()
                 result["checkout_currency"] = result["currency"]
             done_text = "第 7/7 步：PIX 二维码生成完成" if provider == "pix" else (
-                "第 7/7 步：PayPal agreements/approve 链接生成完成" if provider == "paypal" else f"{provider.upper()} 提取完成"
+                "第 7/7 步：PayPal agreements/approve 链接生成完成" if provider == "paypal" else (
+                    "第 7/7 步：Gopay 支付链接生成完成" if provider == "gopay" else f"{provider.upper()} 提取完成"
+                )
             )
+
+            # 记录成功节点信息（用于后续优化代理选择）
+            if provider == "gopay" and (entry_proxy or exit_proxy):
+                try:
+                    import datetime
+                    success_info = []
+                    if entry_proxy:
+                        promo_country, promo_region = proxy_country(entry_proxy)
+                        success_info.append(f"代理池1（优惠更新）={promo_country}/{promo_region}")
+                    if exit_proxy:
+                        payment_country, payment_region = proxy_country(exit_proxy)
+                        success_info.append(f"代理池2（支付）={payment_country}/{payment_region}")
+                    success_info.append(f"时间={datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    success_info.append(f"尝试次数={attempt}")
+                    self.log(job_id, f"✅ Gopay 成功节点：{'; '.join(success_info)}")
+                except Exception:
+                    pass  # 记录失败不影响主流程
+
             self.update(job_id, percent=100, text=done_text, status="done", result=result)
         except InterruptedError as exc:
             self.update(job_id, status="cancelled", percent=100, text=str(exc), error=str(exc))
@@ -2069,7 +2137,7 @@ def health():
 def config():
     return jsonify({
         "plans": list(PLANS),
-        "link_types": ["hosted", "paypal", "ideal", "upi", "pix"],
+        "link_types": ["hosted", "paypal", "ideal", "upi", "pix", "gopay"],
         "country_currency": COUNTRY_CURRENCY,
         "provider_defaults": PROVIDER_DEFAULTS,
         "proxy_policy": {
@@ -2124,7 +2192,7 @@ def start_checkout():
     link_type = str(data.get("link_type") or "hosted").lower()
     if plan not in PLANS:
         return jsonify({"error": "计划类型不正确"}), 400
-    if link_type not in {"hosted", "paypal", "ideal", "upi", "pix"}:
+    if link_type not in {"hosted", "paypal", "ideal", "upi", "pix", "gopay"}:
         return jsonify({"error": "提取方式不正确"}), 400
     defaults = PROVIDER_DEFAULTS.get(link_type, {})
     country = str(data.get("country") or defaults.get("country") or "US").upper()
@@ -2171,6 +2239,16 @@ def start_checkout():
                 if not manual_identity["name"]:
                     return jsonify({"error": f"CNPJ 登记信息查询失败：{exc}"}), 400
         pix_identity.update({key: value for key, value in manual_identity.items() if value})
+    if link_type == "gopay" and country != "ID":
+        return jsonify({"error": "Gopay Checkout 国家必须为 ID/印尼"}), 400
+    try:
+        billing_profile = normalize_billing_profile(
+            data.get("billing_profile"),
+            country,
+            require_complete=link_type == "gopay",
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     options = {
         "token_raw": str(data.get("token") or ""),
         "plan": plan,
@@ -2195,6 +2273,7 @@ def start_checkout():
         "pix_auto_kind": str(data.get("pix_auto_kind") or "cpf").lower()
             if str(data.get("pix_auto_kind") or "cpf").lower() in {"mixed", "cpf", "cnpj"} else "cpf",
         "pix_identity": pix_identity,
+        "billing_profile": billing_profile,
         "retry_count": retry_count,
     }
     if not options["token_raw"].strip():
