@@ -244,6 +244,85 @@ def summarize_checkout_response(payload: Any) -> str:
         elif isinstance(value, (list, tuple)):
             for index, item in enumerate(value[:20]):
                 walk(item, f"{path}[{index}]", depth + 1)
+_CHECKOUT_PAYMENT_METHOD_COLLECTION_KEYS = frozenset({
+    "payment_method_types",
+    "ordered_payment_method_types",
+    "ordered_payment_method_types_and_wallets",
+    "payment_method_specs",
+    "custom_payment_methods",
+})
+_CHECKOUT_PAYMENT_METHOD_VALUE_KEYS = frozenset({
+    "type",
+    "payment_method_type",
+    "provider",
+    "method",
+    "name",
+    "code",
+})
+
+
+def _normalize_checkout_payment_method(value: Any) -> str:
+    """Normalize a method label without retaining arbitrary response data."""
+    if not isinstance(value, str):
+        return ""
+    token = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if not token or len(token) > 64:
+        return ""
+    # OAICS has used several PayPal labels across checkout surfaces.  Keep one
+    # canonical value so callers do not need to understand private variants.
+    if token == "paypal" or token.startswith("paypal_"):
+        return "paypal"
+    return token
+
+
+def extract_checkout_payment_methods(payload: Any) -> list[str]:
+    """Extract safe, normalized payment-method labels from Checkout payloads.
+
+    This intentionally reads only known payment-method containers.  It does
+    not dump the raw OAICS object, which may contain session credentials or
+    customer data.  The result is suitable for capability detection and
+    diagnostic logging, not for constructing a private request body.
+    """
+    methods: list[str] = []
+
+    def add(value: Any) -> None:
+        normalized = _normalize_checkout_payment_method(value)
+        if normalized and normalized not in methods:
+            methods.append(normalized)
+
+    def collect_container(value: Any) -> None:
+        if isinstance(value, str):
+            add(value)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                collect_container(item)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                lowered = str(key).lower()
+                if lowered in _CHECKOUT_PAYMENT_METHOD_VALUE_KEYS:
+                    collect_container(item)
+                elif lowered == "id" and _normalize_checkout_payment_method(item) == "paypal":
+                    add(item)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).lower() in _CHECKOUT_PAYMENT_METHOD_COLLECTION_KEYS:
+                    collect_container(item)
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+
+    walk(payload)
+    return methods
+
+
+def checkout_supports_paypal(payload: Any) -> bool:
+    """Return whether a Checkout response advertises a PayPal rail."""
+    return "paypal" in extract_checkout_payment_methods(payload)
+
+
 
     walk(payload)
     root = ",".join(root_keys[:40]) or "-"
@@ -748,6 +827,9 @@ def promo_campaign_from_payload(payload: Any) -> str:
 PROXY_PROBE_URLS = (
     "https://ipinfo.io/json",
     "https://ipapi.co/json/",
+    detected_methods = extract_checkout_payment_methods(data)
+    if detected_methods:
+        log(f"[checkout] ???????????{detected_methods}")
 )
 PROXY_PROBE_URL = PROXY_PROBE_URLS[0]
 PROXY_PROBE_TIMEOUT = 12
@@ -1731,6 +1813,16 @@ class JobStore:
                 self.update(job_id, percent=56, text="正在检测官方长链金额")
                 if not session_id:
                     if promo_requested:
+            has_oaics_session = bool(
+                is_openai_checkout_session_id(session_id)
+                or is_openai_checkout_session_id(checkout_data.get("openai_checkout_session_id"))
+            )
+            oaics_payment_methods = (
+                extract_checkout_payment_methods(checkout_data)
+                if has_oaics_session
+                else []
+            )
+            options["_oaics_payment_methods"] = oaics_payment_methods
                         raise RuntimeError("官方长链未返回 Stripe Session ID，优惠金额校验失败")
                     self.update(job_id, percent=100, text="支付长链生成完成", status="done", result=result)
                     return
@@ -1776,6 +1868,16 @@ class JobStore:
                             hosted_zero = int(str(hosted_amount)) == 0
                         except (TypeError, ValueError):
                             hosted_zero = str(hosted_amount).strip() in {"0", "0.0", "0.00"}
+                for method in extract_checkout_payment_methods(materialized):
+                    if method not in oaics_payment_methods:
+                        oaics_payment_methods.append(method)
+                options["_oaics_payment_methods"] = oaics_payment_methods
+                self.log(
+                    job_id,
+                    "OAICS ???????????"
+                    f"{oaics_payment_methods or ['???']}?"
+                    f"PayPal={'??' if 'paypal' in oaics_payment_methods else '???'}",
+                )
                         if hosted_zero:
                             break
 
@@ -1787,6 +1889,11 @@ class JobStore:
                     hosted_version,
                     hosted_ctx,
                     hosted_billing,
+                    # An OAICS response may advertise PayPal without exposing
+                    # a Stripe payment_page.  Do not invent a private
+                    # custom_payment_method/start request from that capability
+                    # flag; keep the browser-backed fallback until a verified
+                    # request/response contract is available.
                     hosted_profile,
                     lambda m: self.log(job_id, m),
                 )
@@ -1873,6 +1980,8 @@ class JobStore:
                             real_random=True,
                         )
                         paypal_address = paypal_payment_billing.get("address") or {}
+                "oaics_payment_method_types": list(options.get("_oaics_payment_methods") or []),
+                "oaics_paypal_available": "paypal" in (options.get("_oaics_payment_methods") or []),
                         self.log(
                             job_id,
                             f"PayPal separated billing: OpenAI={country}/{options.get('currency')}, "

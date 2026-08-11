@@ -81,6 +81,43 @@ class CheckoutSessionIdTests(unittest.TestCase):
             "",
         )
 
+    def test_checkout_payment_methods_detect_paypal_from_types_and_specs(self):
+        payload = {
+            "checkout_session_id": "oaics_test_internal",
+            "payment_method_types": ["card", "paypal"],
+            "payment_method_specs": [{"type": "paypal"}],
+        }
+
+        self.assertEqual(
+            app.extract_checkout_payment_methods(payload),
+            ["card", "paypal"],
+        )
+        self.assertTrue(app.checkout_supports_paypal(payload))
+
+    def test_checkout_payment_methods_detect_paypal_custom_variant(self):
+        payload = {
+            "checkout_session": {
+                "custom_payment_methods": [
+                    {"provider": "PayPal Express"},
+                ],
+            },
+            "note": "paypal should not be read from arbitrary fields",
+        }
+
+        self.assertEqual(
+            app.extract_checkout_payment_methods(payload),
+            ["paypal"],
+        )
+
+    def test_checkout_payment_methods_do_not_read_arbitrary_text(self):
+        payload = {
+            "description": "paypal",
+            "metadata": {"provider": "paypal"},
+        }
+
+        self.assertEqual(app.extract_checkout_payment_methods(payload), [])
+        self.assertFalse(app.checkout_supports_paypal(payload))
+
     def test_create_checkout_stores_stripe_id_when_top_level_id_is_oaics(self):
         async def fake_sentinel(*_args, **_kwargs):
             return {}
