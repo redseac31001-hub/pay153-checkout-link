@@ -1,3 +1,4 @@
+import time
 import unittest
 from unittest.mock import patch
 
@@ -51,6 +52,96 @@ class _OaicsHttp(_Http):
 
 
 class CheckoutSessionIdTests(unittest.TestCase):
+    def test_checkout_protocol_classification_prefers_stripe_session(self):
+        self.assertEqual(
+            app.checkout_protocol_from_payload({
+                "checkout_session_id": "oaics_test_internal",
+                "url": "https://pay.openai.com/c/pay/cs_live_expected",
+            }),
+            app.CHECKOUT_PROTOCOL_CS,
+        )
+        self.assertEqual(
+            app.checkout_protocol_from_payload({
+                "checkout_session_id": "oaics_test_internal",
+            }),
+            app.CHECKOUT_PROTOCOL_OAICS,
+        )
+        self.assertEqual(
+            app.checkout_protocol_from_payload({"checkout_session_id": "unknown"}),
+            app.CHECKOUT_PROTOCOL_UNKNOWN,
+        )
+
+    def test_checkout_protocol_hint_requires_fresh_matching_or_de_baseline_scope(self):
+        now = time.time()
+        base = {
+            "checkout_protocol_hint": "oaics",
+            "checkout_protocol_hint_country": "DE",
+            "checkout_protocol_hint_currency": "EUR",
+            "checkout_protocol_hint_checked_at": now,
+            "checkout_country": "BR",
+            "checkout_currency": "BRL",
+        }
+        self.assertFalse(app.checkout_protocol_hint_matches(base, now=now))
+        self.assertTrue(app.checkout_protocol_hint_matches({
+            **base,
+            "checkout_protocol_hint_baseline": True,
+        }, now=now))
+        self.assertFalse(app.checkout_protocol_hint_matches({
+            **base,
+            "checkout_protocol_hint_baseline": True,
+            "checkout_protocol_hint_checked_at": now - app.CHECKOUT_PROTOCOL_HINT_TTL_SECONDS - 1,
+        }, now=now))
+
+    def test_detection_result_is_not_written_as_a_success_link(self):
+        class FakeStore:
+            _run_locked = app.JobStore._run_locked
+
+            def __init__(self):
+                self.state = {}
+                self.successes = 0
+                self.finalized = 0
+
+            def cancelled(self, _job_id):
+                return False
+
+            def get(self, _job_id):
+                return dict(self.state)
+
+            def log(self, _job_id, _message):
+                return None
+
+            def update(self, _job_id, **fields):
+                self.state.update(fields)
+
+            def _record_success(self, _job_id, _result):
+                self.successes += 1
+
+            def _finalize_oaics_fallback(self, _job_id, _result):
+                self.finalized += 1
+
+            def _run_single(self, _job_id, _options):
+                self.state.update({
+                    "status": "done",
+                    "result": {
+                        "detection_only": True,
+                        "checkout_protocol": "oaics",
+                    },
+                })
+
+        store = FakeStore()
+        store._run_locked("job-detect", {
+            "retry_count": 1,
+            "link_type": "paypal",
+            "country": "DE",
+            "currency": "EUR",
+            "entry_proxies": ["proxy-a"],
+            "exit_proxies": ["proxy-b"],
+            "detection_only": True,
+            "detection_fixed_de": True,
+        })
+        self.assertEqual(store.successes, 0)
+        self.assertEqual(store.finalized, 0)
+
     def test_stripe_id_wins_over_openai_id_in_url(self):
         payload = {
             "checkout_session_id": "oaics_test_internal",
@@ -179,6 +270,9 @@ class CheckoutSessionIdTests(unittest.TestCase):
             def log(self, _job_id, _message):
                 return None
 
+            def _record_success(self, _job_id, _result):
+                return None
+
             def update(self, _job_id, **fields):
                 self.updates.append(fields)
                 self.state.update(fields)
@@ -274,12 +368,61 @@ class CheckoutSessionIdTests(unittest.TestCase):
 
     def test_oaics_retry_count_in_options(self):
         """测试 options 中的 _oaics_retry_count 字段正确递增"""
-        # 这是一个集成测试的占位，实际需要 mock 整个流程
-        # 验证：
-        # 1. 第1次返回 oaics_*，_oaics_retry_count 应为 0
-        # 2. 抛出 OaicsConversionFailedError 后，_oaics_retry_count 递增为 1
-        # 3. 第2次返回 cs_live_*，成功完成
-        pass
+        class FakeStore:
+            _run_locked = app.JobStore._run_locked
+
+            def __init__(self):
+                self.attempts = 0
+                self.seen_retry_counts = []
+                self.state = {}
+
+            def cancelled(self, _job_id):
+                return False
+
+            def get(self, _job_id):
+                return dict(self.state)
+
+            def log(self, _job_id, _message):
+                return None
+
+            def update(self, _job_id, **fields):
+                self.state.update(fields)
+
+            def _record_success(self, _job_id, _result):
+                return None
+
+            def _finalize_oaics_fallback(self, _job_id, _result):
+                return None
+
+            def _run_single(self, _job_id, options):
+                self.attempts += 1
+                self.seen_retry_counts.append(options.get("_oaics_retry_count", 0))
+                if options.get("_oaics_retry_count", 0) < app.MAX_OAICS_RETRY:
+                    self.state.update({
+                        "status": "error",
+                        "error": "oaics conversion failed",
+                        "error_code": app.OAICS_CONVERSION_FAILED_ERROR_CODE,
+                    })
+                else:
+                    self.state.update({
+                        "status": "done",
+                        "result": {
+                            "checkout_session_id": "cs_live_after_oaics_retry",
+                            "checkout_flow": "stripe",
+                        },
+                    })
+
+        store = FakeStore()
+        store._run_locked("job-oaics-retry", {
+            "retry_count": 1,
+            "link_type": "paypal",
+            "country": "US",
+            "entry_proxies": ["proxy-a", "proxy-b"],
+            "exit_proxies": ["proxy-c", "proxy-d"],
+        })
+        self.assertEqual(store.attempts, app.MAX_OAICS_RETRY + 1)
+        self.assertEqual(store.seen_retry_counts, list(range(app.MAX_OAICS_RETRY + 1)))
+        self.assertEqual(store.state["status"], "done")
 
     def test_max_oaics_retry_constant(self):
         """测试 MAX_OAICS_RETRY 常量存在且为合理值"""

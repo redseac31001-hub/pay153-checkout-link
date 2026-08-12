@@ -105,6 +105,42 @@ class ManageStoreTests(unittest.TestCase):
             second = self.make_store(root, legacy_path)
             self.assertEqual(second.summary()["success_records"], 1)
 
+    def test_oaics_fallback_is_encrypted_and_can_be_finalized(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = self.make_store(root)
+            store.record_oaics_fallback({
+                "job_id": "job-oaics-1",
+                "recorded_at": "2026-08-12 12:00:00",
+                "status": "pending",
+                "link_type": "paypal",
+                "plan": "plus",
+                "country": "BR",
+                "currency": "BRL",
+                "account_email": "person@example.test",
+                "account_id": "acct_oaics_123",
+                "session_id": "oaics_sensitive_session",
+                "processor_entity": "openai_llc",
+                "payment_methods": ["link", "card"],
+                "url": "https://chatgpt.com/checkout/openai_llc/oaics_sensitive_session",
+                "attempt": 1,
+                "max_attempts": 3,
+            })
+
+            pending = store.get_oaics_fallback_by_job("job-oaics-1", reveal=True)
+            self.assertEqual(pending["status"], "pending")
+            self.assertEqual(pending["url"], "https://chatgpt.com/checkout/openai_llc/oaics_sensitive_session")
+            self.assertEqual(pending["session_id"], "oaics_sensitive_session")
+            self.assertEqual(pending["payment_methods"], ["link", "card"])
+
+            store.finalize_oaics_fallback("job-oaics-1", "superseded", "cs_live_final")
+            finalized = store.get_oaics_fallback_by_job("job-oaics-1", reveal=True)
+            self.assertEqual(finalized["status"], "superseded")
+            self.assertEqual(finalized["resolved_session_id"], "cs_live_final")
+
+            raw_db = Path(root, "manage.sqlite3").read_bytes()
+            self.assertNotIn(b"oaics_sensitive_session", raw_db)
+            self.assertNotIn(b"https://chatgpt.com/checkout", raw_db)
+
 
 if __name__ == "__main__":
     unittest.main()

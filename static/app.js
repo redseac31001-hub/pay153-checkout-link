@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const form = $('checkoutForm');
 let jobId = '';
+let singleJobBinding = null;
 let pollTimer = 0;
 let countdownTimer = 0;
 let displayedProgress = 0;
@@ -14,6 +15,10 @@ let renderedLogKey = '';
 let activeRunMode = '';
 let batchPollTimer = 0;
 let batchJobs = [];
+let activeBatchTaskType = 'checkout';
+let batchPumpTimer = 0;
+let batchPumpRunning = false;
+let batchCreateReadyAt = 0;
 const batchSelectedAccountIds = new Set();
 let taskLimits = {perIp: 3, global: 20, workers: 20};
 
@@ -41,6 +46,8 @@ const ACCOUNT_PAYMENT_METHOD_ALIASES = {
   upi: 'upi',
   hosted: 'hosted'
 };
+const CHECKOUT_PROTOCOL_TTL_MS = 24 * 60 * 60 * 1000;
+const CHECKOUT_PROTOCOLS = new Set(['oaics', 'cs', 'unknown']);
 const accountEntries = [];
 let activeAccountId = '';
 let accountIdSeq = 0;
@@ -926,6 +933,8 @@ function setRunning(running, mode=''){
   if (running && mode) activeRunMode = mode;
   if (!running) activeRunMode = '';
   if ($('submitButton')) $('submitButton').disabled = running;
+  if ($('accountDetectProtocol')) $('accountDetectProtocol').disabled = running;
+  if ($('accountBatchDetect')) $('accountBatchDetect').disabled = running;
   if ($('cancelButton')) $('cancelButton').hidden = !running || activeRunMode !== 'single';
   if ($('batchCancelButton')) $('batchCancelButton').hidden = !running || activeRunMode !== 'batch';
   updateBatchControls();
@@ -1010,6 +1019,7 @@ function parseAccountRaw(raw, sourceLabel=''){
     promoStatus: 'unknown',
     promoReason: '',
     paymentMethods: {},
+    checkoutProtocols: {},
     riskStatus: 'unknown',
     riskReason: '',
     lastError: '',
@@ -1063,6 +1073,53 @@ function normalizeAccountPaymentMethods(value){
   return output;
 }
 
+function normalizeCheckoutProtocol(value){
+  const normalized = String(value || '').trim().toLowerCase();
+  return CHECKOUT_PROTOCOLS.has(normalized) ? normalized : 'unknown';
+}
+
+function checkoutProtocolKey(country, currency, method='paypal'){
+  const rail = normalizeAccountPaymentMethod(method) || 'paypal';
+  const normalizedCountry = String(country || '').trim().toUpperCase();
+  const normalizedCurrency = String(currency || '').trim().toUpperCase();
+  return `${rail}:${normalizedCountry}:${normalizedCurrency}`;
+}
+
+function normalizeAccountCheckoutProtocols(value){
+  const output = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return output;
+  Object.entries(value).slice(0, 100).forEach(([key, raw]) => {
+    if (!raw || typeof raw !== 'object') return;
+    const protocol = normalizeCheckoutProtocol(raw.protocol);
+    const country = String(raw.country || '').trim().toUpperCase().slice(0, 8);
+    const currency = String(raw.currency || '').trim().toUpperCase().slice(0, 8);
+    const checkedAt = Number(raw.checkedAt || raw.checked_at || 0);
+    if (!country || !currency || !checkedAt) return;
+    output[String(key).slice(0, 80)] = {
+      protocol,
+      country,
+      currency,
+      checkedAt: checkedAt < 100000000000 ? checkedAt * 1000 : checkedAt,
+      baseline: Boolean(raw.baseline),
+      source: String(raw.source || 'checkout').slice(0, 40),
+      paymentMethods: normalizeAccountPaymentMethods(raw.paymentMethods || raw.payment_method_types)
+    };
+  });
+  return output;
+}
+
+function freshCheckoutProtocolRecord(entry, country, currency, method='paypal', now=Date.now()){
+  const protocols = normalizeAccountCheckoutProtocols(entry?.checkoutProtocols);
+  const exact = protocols[checkoutProtocolKey(country, currency, method)];
+  const fresh = record => record && now - Number(record.checkedAt || 0) <= CHECKOUT_PROTOCOL_TTL_MS;
+  if (fresh(exact)) return {...exact, baseline: Boolean(exact.baseline), scope: 'region'};
+  if (normalizeAccountPaymentMethod(method) === 'paypal') {
+    const baseline = protocols[checkoutProtocolKey('DE', 'EUR', 'paypal')];
+    if (fresh(baseline)) return {...baseline, baseline: true, scope: 'de_baseline'};
+  }
+  return null;
+}
+
 function restoreAccountStatus(target, source){
   target.cooldownUntil = Number(source?.cooldownUntil || target.cooldownUntil || 0);
   target.lastDeclineAt = Number(source?.lastDeclineAt || target.lastDeclineAt || 0);
@@ -1073,6 +1130,7 @@ function restoreAccountStatus(target, source){
     ? source.promoStatus : (target.promoStatus || 'unknown');
   target.promoReason = String(source?.promoReason || target.promoReason || '').slice(0, 240);
   target.paymentMethods = normalizeAccountPaymentMethods(source?.paymentMethods || target.paymentMethods);
+  target.checkoutProtocols = normalizeAccountCheckoutProtocols(source?.checkoutProtocols || target.checkoutProtocols);
   target.riskStatus = ['clear', 'rejected', 'cooldown', 'blocked', 'frozen', 'unknown'].includes(source?.riskStatus)
     ? source.riskStatus : (target.riskStatus || 'unknown');
   target.riskReason = String(source?.riskReason || target.riskReason || '').slice(0, 240);
@@ -1138,6 +1196,7 @@ function persistAccounts(){
       promoStatus: entry.promoStatus || 'unknown',
       promoReason: String(entry.promoReason || '').slice(0, 240),
       paymentMethods: normalizeAccountPaymentMethods(entry.paymentMethods),
+      checkoutProtocols: normalizeAccountCheckoutProtocols(entry.checkoutProtocols),
       riskStatus: entry.riskStatus || 'unknown',
       riskReason: String(entry.riskReason || '').slice(0, 240),
       lastError: String(entry.lastError || '').slice(0, 240),
@@ -1214,6 +1273,12 @@ function updateBatchControls(){
     batchButton.disabled = selectedCount < 2 || Boolean(activeRunMode);
     batchButton.title = selectedCount < 2 ? '至少勾选 2 个有效账号' : '同时创建多个独立提链任务';
   }
+  const detectButton = $('accountBatchDetect');
+  if (detectButton) {
+    detectButton.textContent = `批量检测协议（${selectedCount}）`;
+    detectButton.disabled = selectedCount < 2 || Boolean(activeRunMode);
+    detectButton.title = selectedCount < 2 ? '至少勾选 2 个有效账号' : '同时检测所选账号的 DE/EUR PayPal 协议';
+  }
   const selectAll = $('accountSelectAll');
   if (selectAll) {
     const available = accountEntries.filter(entry => accountCanBatch(entry));
@@ -1249,6 +1314,20 @@ function accountMarkerView(entry, now=Date.now()){
   if (entry?.promoStatus === 'unsupported') return ['优惠未生效', 'warn'];
   if (entry?.promoStatus === 'supported' || String(entry?.riskStatus || '') === 'clear') return ['可选', 'good'];
   return ['待检测', 'neutral'];
+}
+
+function accountProtocolView(entry, now=Date.now()){
+  const exact = entry?.lastCountry && entry?.lastCurrency
+    ? freshCheckoutProtocolRecord(entry, entry.lastCountry, entry.lastCurrency, 'paypal', now)
+    : null;
+  const record = exact || freshCheckoutProtocolRecord(entry, 'DE', 'EUR', 'paypal', now);
+  if (!record) return null;
+  const protocol = record.protocol === 'oaics' ? 'OAICS' : record.protocol === 'cs' ? 'CS' : '未知';
+  const scope = `${record.country}/${record.currency}`;
+  return {
+    label: `协议 ${protocol} · ${scope}${record.baseline ? ' 基线' : ''}`,
+    tone: record.protocol === 'unknown' ? 'neutral' : 'good'
+  };
 }
 
 function accountMethodLabel(method){
@@ -1362,6 +1441,8 @@ function renderAccountList(){
     summary.append(accountChipBadge(marker[0], marker[1]));
     if (entry.promoStatus === 'supported') summary.append(accountChipBadge('优惠支持', 'good'));
     if (entry.promoStatus === 'unsupported' && marker[0] !== '优惠未生效') summary.append(accountChipBadge('优惠未生效', 'warn'));
+    const protocolView = accountProtocolView(entry, now);
+    if (protocolView) summary.append(accountChipBadge(protocolView.label, protocolView.tone));
     const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
       .filter(method => entry.paymentMethods[method] === 'supported');
     if (supportedMethods.length) {
@@ -1622,12 +1703,43 @@ function accountRiskFromFailure(data){
   return {status: 'unknown', reason: errorText.slice(0, 240)};
 }
 
+function recordAccountCheckoutProtocol(target, result){
+  if (!target || !result || typeof result !== 'object') return null;
+  const method = normalizeAccountPaymentMethod(result.link_type || 'paypal');
+  if (method !== 'paypal') return null;
+  const protocol = normalizeCheckoutProtocol(result.checkout_protocol);
+  const country = String(result.checkout_protocol_country || result.checkout_country || '').trim().toUpperCase();
+  const currency = String(result.checkout_protocol_currency || result.checkout_currency || '').trim().toUpperCase();
+  if (!country || !currency) return null;
+  const checkedAtRaw = Number(result.checkout_protocol_checked_at || Date.now());
+  const checkedAt = checkedAtRaw < 100000000000 ? checkedAtRaw * 1000 : checkedAtRaw;
+  const key = checkoutProtocolKey(country, currency, method);
+  const methods = normalizeAccountPaymentMethods(
+    result.oaics_payment_method_types || result.payment_method_types || []
+  );
+  target.checkoutProtocols = normalizeAccountCheckoutProtocols(target.checkoutProtocols);
+  target.checkoutProtocols[key] = {
+    protocol,
+    country: country.slice(0, 8),
+    currency: currency.slice(0, 8),
+    checkedAt,
+    baseline: Boolean(result.checkout_protocol_baseline),
+    source: String(result.checkout_protocol_source || (result.detection_only ? 'fixed_de' : 'checkout')).slice(0, 40),
+    paymentMethods: methods
+  };
+  return target.checkoutProtocols[key];
+}
+
 function recordAccountOutcome(target, data, requestedMethod='', jobId=''){
   if (!target) return null;
   const now = Date.now();
   const result = data?.result && typeof data.result === 'object' ? data.result : {};
   const outcomeStatus = String(data?.status || '').toLowerCase();
   const frozenBeforeOutcome = isAccountFrozen(target);
+  let protocolRecord = null;
+  if (outcomeStatus === 'done' && result.checkout_protocol) {
+    protocolRecord = recordAccountCheckoutProtocol(target, result);
+  }
   const methods = normalizeAccountPaymentMethods(
     result.oaics_payment_method_types || result.payment_method_types || []
   );
@@ -1702,6 +1814,12 @@ function recordAccountOutcome(target, data, requestedMethod='', jobId=''){
   target.updatedAt = now;
   persistAccounts();
   renderAccountList();
+  if (result.detection_only && protocolRecord) {
+    setAccountImportStatus(
+      `${target.label} 协议已记录：${String(protocolRecord.protocol || 'unknown').toUpperCase()} · ${protocolRecord.country}/${protocolRecord.currency}`,
+      protocolRecord.protocol === 'unknown' ? '' : 'ok'
+    );
+  }
   return target;
 }
 
@@ -1723,6 +1841,28 @@ function findAccountForToken(tokenRaw, create=false){
 function recordActiveAccountOutcome(data, requestedMethod='', jobId=''){
   const target = findAccountForToken($('token')?.value || '', true);
   return target ? recordAccountOutcome(target, data, requestedMethod, jobId) : null;
+}
+
+function singleJobAccountEntry(){
+  const binding = singleJobBinding;
+  if (!binding) return null;
+  return accountEntries.find(item => item.id === binding.entryId) || binding.entry || null;
+}
+
+function recordSingleJobOutcome(data, currentJobId=''){
+  const binding = singleJobBinding;
+  const target = singleJobAccountEntry();
+  if (binding && target) {
+    return recordAccountOutcome(target, data, binding.requestedMethod, currentJobId);
+  }
+  return recordActiveAccountOutcome(data, selected('link_type'), currentJobId);
+}
+
+function markSingleJobCooldown(ms=ACCOUNT_COOLDOWN_MS, reason=''){
+  const binding = singleJobBinding;
+  const target = singleJobAccountEntry();
+  if (binding && target) return markAccountCooldown(target, ms, reason);
+  return markActiveAccountCooldown(ms, reason);
 }
 
 function splitAccountImportText(raw, sourceLabel='手动粘贴'){
@@ -1812,6 +1952,7 @@ function initializeAccountManager(){
     setAccountImportStatus(allSelected ? '已取消全部批量选择' : `已选择 ${available.length} 个可用账号`, 'ok');
   });
   $('accountBatchRun')?.addEventListener('click', () => void startBatchCheckout());
+  $('accountBatchDetect')?.addEventListener('click', () => void startBatchProtocolDetection());
   if (fileInput) {
     fileInput.addEventListener('change', async () => {
       try{ await importAccountFiles(fileInput.files); }
@@ -1822,6 +1963,7 @@ function initializeAccountManager(){
     if (accountEntries.length && !window.confirm('确认清空本机保存的全部账号？')) return;
     clearAllAccounts();
   });
+  $('accountDetectProtocol')?.addEventListener('click', () => void startProtocolDetection());
   $('token')?.addEventListener('input', () => {
     if (!activeAccountId) return;
     const active = accountEntries.find(item => item.id === activeAccountId);
@@ -1856,7 +1998,7 @@ async function loadTaskLimits(){
   }catch{ /* the local defaults keep batch selection usable offline */ }
 }
 
-function isTerminalJobStatus(status){ return ['done', 'error', 'cancelled'].includes(String(status || '')); }
+function isTerminalJobStatus(status){ return ['done', 'skipped', 'error', 'cancelled'].includes(String(status || '')); }
 
 function isPaypalFuse(data){
   const errorText = String(data?.error || data?.text || '');
@@ -1893,27 +2035,35 @@ function showResult(result){
   if (!$('resultPanel')) return;
   const url = resultUrl(result);
   $('resultPanel').hidden = false;
-  if ($('resultType')) $('resultType').textContent = railDisplayNames[result?.link_type] || result?.link_type || '—';
+  if ($('resultType')) $('resultType').textContent = result?.detection_only
+    ? 'PayPal 协议检测'
+    : (railDisplayNames[result?.link_type] || result?.link_type || '—');
   if ($('resultEmail')) $('resultEmail').textContent = result?.account_email || result?.account_id || '—';
   if ($('resultRegion')) $('resultRegion').textContent = [result?.checkout_country || result?.country, result?.checkout_currency || result?.currency].filter(Boolean).join(' / ') || '—';
   if ($('resultPromo')) {
-    const promo = result?.promo_applied === true || result?.promo_update_accepted === true ? '已应用' : result?.promo_requested ? '已尝试' : '未使用';
+    const promo = result?.detection_only
+      ? `协议 ${String(result?.checkout_protocol || 'unknown').toUpperCase()}`
+      : (result?.promo_applied === true || result?.promo_update_accepted === true ? '已应用' : result?.promo_requested ? '已尝试' : '未使用');
     $('resultPromo').textContent = promo;
   }
-  if ($('resultSession')) $('resultSession').textContent = result?.checkout_session_id || '—';
-  if ($('resultValue')) $('resultValue').value = url;
+  if ($('resultSession')) $('resultSession').textContent = result?.detection_only
+    ? `${result?.checkout_protocol || 'unknown'} · ${result?.checkout_protocol_source || '检测'}`
+    : (result?.checkout_session_id || '—');
+  if ($('resultValue')) $('resultValue').value = result?.detection_only
+    ? '本次仅完成协议检测，未生成最终付款链接。'
+    : url;
   if ($('openResult')) {
     $('openResult').href = url || '#';
     $('openResult').hidden = !url;
   }
 }
 
-function buildCheckoutBody(tokenValue){
+function buildCheckoutBody(tokenValue, overrides={}){
   const plan = selected('plan');
   const linkType = selected('link_type');
   const billingProfile = linkType === 'gopay' ? readBillingProfile() : null;
   const paypalBillingSelection = readPaypalBillingSelection();
-  return {
+  const body = {
     token: String(tokenValue || ''), plan, link_type: linkType, country: $('country').value,
     currency: $('currency').value, entry_proxies: proxyLines($('entryProxy')), exit_proxies: proxyLines($('exitProxy')),
     billing_profile: billingProfile && billingProfileHasContent(billingProfile) ? billingProfile : null,
@@ -1929,6 +2079,29 @@ function buildCheckoutBody(tokenValue){
     pix_tax_id: linkType === 'pix' ? $('pixTaxId').value.trim() : '',
     pix_auto_kind: linkType === 'pix' ? $('pixAutoKind').value : 'cpf'
   };
+  const account = findAccountForToken(tokenValue || $('token')?.value || '', false);
+  if (linkType === 'paypal' && !overrides.detectionOnly) {
+    const protocol = freshCheckoutProtocolRecord(account, body.country, body.currency, 'paypal');
+    if (protocol) {
+      body.checkout_protocol_hint = protocol.protocol;
+      body.checkout_protocol_hint_country = protocol.country;
+      body.checkout_protocol_hint_currency = protocol.currency;
+      body.checkout_protocol_hint_checked_at = protocol.checkedAt;
+      body.checkout_protocol_hint_baseline = Boolean(protocol.baseline || protocol.scope === 'de_baseline');
+    }
+  }
+  if (overrides.detectionOnly) {
+    body.link_type = 'paypal';
+    body.country = 'DE';
+    body.currency = 'EUR';
+    body.use_promo = false;
+    body.promo_campaign = '';
+    body.billing_selection = null;
+    body.detection_only = true;
+    body.detection_fixed_de = overrides.detectionFixedDe !== false;
+    body.retry_count = 2;
+  }
+  return body;
 }
 
 function validateCheckoutOptions({batch=false}={}){
@@ -1977,6 +2150,36 @@ function validateCheckoutOptions({batch=false}={}){
   return true;
 }
 
+function validateProtocolDetection(){
+  if (selected('link_type') !== 'paypal') {
+    setAccountImportStatus('协议检测目前仅用于 PayPal，请先切换到 PayPal', 'error');
+    setProgress(100, '协议检测仅支持 PayPal', 'error');
+    return false;
+  }
+  if (!String($('token')?.value || '').trim()) {
+    setAccountImportStatus('请先选择或粘贴一个账号', 'error');
+    $('token')?.focus();
+    setProgress(100, '缺少 Access Token', 'error');
+    return false;
+  }
+  if (!proxyLines($('entryProxy')).length || !proxyLines($('exitProxy')).length) {
+    setAccountImportStatus('协议检测需要填写代理池 1 和代理池 2', 'error');
+    setProgress(100, '缺少 PayPal 代理池', 'error');
+    return false;
+  }
+  const blocker = getActiveAccountCooldownBlocker();
+  if (blocker) {
+    const frozen = isAccountFrozen(blocker);
+    setAccountImportStatus(
+      frozen ? `${blocker.label} 已冻结，暂不执行协议检测` : `${blocker.label} 冷却中，暂不执行协议检测`,
+      'error'
+    );
+    setProgress(100, frozen ? '账号已冻结' : '账号冷却中', 'error');
+    return false;
+  }
+  return true;
+}
+
 function validateFormForBatch(){
   const token = $('token');
   const required = token?.required;
@@ -2001,25 +2204,28 @@ async function poll(){
     if (data.status === 'done') {
       clearInterval(pollTimer);
       setRunning(false);
-      recordActiveAccountOutcome(data, selected('link_type'), jobId);
+      recordSingleJobOutcome(data, jobId);
+      singleJobBinding = null;
       showResult(data.result || {});
     }
     if (data.status === 'error' || data.status === 'cancelled') {
       clearInterval(pollTimer);
       setRunning(false);
-      recordActiveAccountOutcome(data, selected('link_type'), jobId);
+      recordSingleJobOutcome(data, jobId);
       if (data.error) renderLogs([...(data.logs||[]),{time:'ERROR',message:data.error}]);
-      if (isPaypalFuse(data)) markActiveAccountCooldown(ACCOUNT_COOLDOWN_MS, '任务风控熔断');
+      if (isPaypalFuse(data)) markSingleJobCooldown(ACCOUNT_COOLDOWN_MS, '任务风控熔断');
+      singleJobBinding = null;
     }
   }catch(e){
     clearInterval(pollTimer);
+    singleJobBinding = null;
     setRunning(false);
     setProgress(100, e.message || String(e), 'error');
   }
 }
 
 function batchStatusLabel(status){
-  return ({creating:'创建中', queued:'排队中', running:'运行中', done:'完成', error:'失败', cancelled:'已停止'}[status] || '等待');
+  return ({creating:'创建中', queued:'排队中', running:'运行中', pending:'候补中', done:'完成', skipped:'已跳过', error:'失败', cancelled:'已停止'}[status] || '等待');
 }
 
 async function cancelBatchJob(job){
@@ -2043,6 +2249,7 @@ async function cancelBatchJob(job){
     recordAccountOutcome(job.entry, {status: 'cancelled', error: '任务已停止'}, job.requestedMethod, job.jobId);
     renderBatchJobs();
     updateBatchAggregate();
+    void pumpBatchQueue();
     return true;
   }catch(error){
     job.cancelPending = false;
@@ -2124,16 +2331,21 @@ function updateBatchAggregate(){
   if (!batchJobs.length) return;
   const total = batchJobs.length;
   const done = batchJobs.filter(job => job.status === 'done').length;
+  const skipped = batchJobs.filter(job => job.status === 'skipped').length;
   const failed = batchJobs.filter(job => job.status === 'error').length;
   const cancelled = batchJobs.filter(job => job.status === 'cancelled').length;
-  const terminal = done + failed + cancelled;
+  const waiting = batchJobs.filter(job => job.status === 'pending').length;
+  const terminal = done + skipped + failed + cancelled;
   const active = total - terminal;
   const percent = Math.round(batchJobs.reduce((sum, job) => sum + Math.max(0, Math.min(100, Number(job.percent) || 0)), 0) / total);
   const complete = terminal === total;
-  const status = complete ? (done === total ? 'done' : (cancelled === total ? 'cancelled' : 'error')) : 'running';
+  const status = complete
+    ? (failed || cancelled ? 'error' : 'done')
+    : 'running';
+  const actionLabel = activeBatchTaskType === 'protocol_detection' ? '协议检测' : '批量提链';
   const summary = complete
-    ? `批量结束：${done} 个完成${failed ? ` · ${failed} 个失败` : ''}${cancelled ? ` · ${cancelled} 个已停止` : ''}`
-    : `${done}/${total} 个完成 · ${active} 个任务处理中`;
+    ? `${actionLabel}结束：${done} 个完成${skipped ? ` · ${skipped} 个跳过` : ''}${failed ? ` · ${failed} 个失败` : ''}${cancelled ? ` · ${cancelled} 个已停止` : ''}`
+    : `${actionLabel}：${done}/${total} 个完成${skipped ? ` · ${skipped} 个跳过` : ''} · ${active - waiting} 个处理中${waiting ? ` · ${waiting} 个候补等待` : ''}`;
   if ($('batchSummary')) $('batchSummary').textContent = summary;
   if ($('batchBadge')) {
     $('batchBadge').className = `status-badge ${status}`;
@@ -2143,7 +2355,102 @@ function updateBatchAggregate(){
   if (complete && activeRunMode === 'batch') {
     clearInterval(batchPollTimer);
     batchPollTimer = 0;
+    if (batchPumpTimer) {
+      clearTimeout(batchPumpTimer);
+      batchPumpTimer = 0;
+    }
     setRunning(false);
+  }
+}
+
+function batchConcurrencyLimit(){
+  const perIp = Math.max(1, Number(taskLimits.perIp) || 1);
+  const workers = Math.max(1, Number(taskLimits.workers) || perIp);
+  return Math.max(1, Math.min(perIp, workers));
+}
+
+function batchActiveCount(){
+  return batchJobs.filter(job => (
+    job.status === 'creating'
+    || (job.jobId && !isTerminalJobStatus(job.status))
+  )).length;
+}
+
+function scheduleBatchPump(delayMs=1000){
+  if (activeRunMode !== 'batch') return;
+  if (batchPumpTimer) clearTimeout(batchPumpTimer);
+  const waitMs = Math.max(250, Number(delayMs) || 0, batchCreateReadyAt - Date.now());
+  batchPumpTimer = setTimeout(() => {
+    batchPumpTimer = 0;
+    void pumpBatchQueue();
+  }, waitMs);
+}
+
+async function submitBatchJob(job){
+  const detection = activeBatchTaskType === 'protocol_detection';
+  job.status = 'creating';
+  job.percent = Math.max(1, Number(job.percent) || 1);
+  job.text = activeBatchTaskType === 'protocol_detection' ? '正在创建检测任务' : '正在创建任务';
+  job.error = '';
+  renderBatchJobs();
+  try{
+    const response = await fetch(detection ? '/api/checkout-detect' : '/api/checkout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(detection
+        ? buildCheckoutBody(job.entry.raw, {detectionOnly: true, detectionFixedDe: true})
+        : buildCheckoutBody(job.entry.raw))
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 429) {
+      const headerRetry = Number(response.headers?.get?.('Retry-After') || 0);
+      const retryAfter = Math.max(1, headerRetry || Number(data.retry_after) || 60);
+      batchCreateReadyAt = Math.max(batchCreateReadyAt, Date.now() + retryAfter * 1000);
+      job.status = 'pending';
+      job.percent = 1;
+      job.text = `候补等待创建窗口 · ${retryAfter} 秒后自动重试`;
+      job.error = '';
+      scheduleBatchPump(retryAfter * 1000);
+      return false;
+    }
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    job.jobId = String(data.job_id || '');
+    if (!job.jobId) throw new Error('服务未返回任务 ID');
+    job.status = 'queued';
+    job.percent = Number(data.queue_position) > 0 ? 2 : 3;
+    job.text = Number(data.queue_position) > 0
+      ? `${detection ? '检测' : ''}排队中 · 前方 ${data.queue_position - 1} 个任务`
+      : (detection ? '等待检测' : '等待执行');
+    return true;
+  }catch(error){
+    job.status = 'error';
+    job.percent = 100;
+    job.error = error.message || String(error);
+    job.text = detection ? '检测任务创建失败' : '创建失败';
+    recordAccountOutcome(job.entry, {status: 'error', error: job.error}, job.requestedMethod);
+    return false;
+  }
+}
+
+async function pumpBatchQueue(){
+  if (batchPumpRunning || activeRunMode !== 'batch') return;
+  batchPumpRunning = true;
+  try{
+    if (batchCreateReadyAt > Date.now()) {
+      scheduleBatchPump(batchCreateReadyAt - Date.now());
+      return;
+    }
+    const limit = batchConcurrencyLimit();
+    while (activeRunMode === 'batch' && batchActiveCount() < limit) {
+      const next = batchJobs.find(job => job.status === 'pending' && !job.jobId);
+      if (!next) break;
+      const accepted = await submitBatchJob(next);
+      if (!accepted && next.status === 'pending') break;
+    }
+    renderBatchJobs();
+    updateBatchAggregate();
+  }finally{
+    batchPumpRunning = false;
   }
 }
 
@@ -2152,6 +2459,7 @@ async function pollBatch(){
   const activeJobs = batchJobs.filter(job => job.jobId && !isTerminalJobStatus(job.status));
   if (!activeJobs.length) {
     updateBatchAggregate();
+    void pumpBatchQueue();
     return;
   }
   await Promise.all(activeJobs.map(async job => {
@@ -2178,6 +2486,110 @@ async function pollBatch(){
   renderBatchJobs();
   renderBatchLogs();
   updateBatchAggregate();
+  void pumpBatchQueue();
+}
+
+async function startProtocolDetection(){
+  if (activeRunMode || !validateProtocolDetection()) return;
+  resetProgress();
+  $('resultPanel').hidden = true;
+  $('batchPanel').hidden = true;
+  $('logBox').innerHTML = '<div class="empty-log">正在执行 DE/EUR PayPal 协议检测…</div>';
+  renderedLogKey = '';
+  logAutoFollow = true;
+  setRunning(true, 'single');
+  setProgress(3, '提交协议检测任务', 'running');
+  const body = buildCheckoutBody($('token').value, {detectionOnly: true, detectionFixedDe: true});
+  try{
+    const r = await fetch('/api/checkout-detect', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    jobId = data.job_id;
+    if (data.queue_position > 0) setProgress(2, `检测任务已排队，当前第 ${data.queue_position} 位`, 'queued');
+    clearInterval(pollTimer); await poll();
+    if (activeRunMode === 'single') pollTimer = setInterval(poll, 1200);
+  }catch(error){
+    setRunning(false);
+    setProgress(100, error.message || String(error), 'error');
+  }
+}
+
+async function startBatchProtocolDetection(){
+  if (activeRunMode) return;
+  const accounts = getBatchSelectedAccounts();
+  if (accounts.length < 2) {
+    setAccountImportStatus('请至少勾选 2 个有效账号后再批量检测协议', 'error');
+    return;
+  }
+  if (selected('link_type') !== 'paypal') {
+    setAccountImportStatus('批量协议检测仅支持 PayPal，请先切换到 PayPal', 'error');
+    setProgress(100, '批量协议检测仅支持 PayPal', 'error');
+    return;
+  }
+  if (!proxyLines($('entryProxy')).length || !proxyLines($('exitProxy')).length) {
+    setAccountImportStatus('批量协议检测需要填写代理池 1 和代理池 2', 'error');
+    setProgress(100, '缺少 PayPal 代理池', 'error');
+    return;
+  }
+  const skippedAccounts = accounts
+    .map(entry => ({entry, record: freshCheckoutProtocolRecord(entry, 'DE', 'EUR', 'paypal')}))
+    .filter(item => item.record);
+  const pendingAccounts = accounts.filter(entry => !skippedAccounts.some(item => item.entry.id === entry.id));
+  resetProgress();
+  $('resultPanel').hidden = true;
+  $('batchPanel').hidden = false;
+  if ($('batchPanelTitle')) $('batchPanelTitle').textContent = '批量协议检测';
+  $('logBox').innerHTML = `<div class="empty-log">正在排队检测 ${pendingAccounts.length} 个账号的 DE/EUR 协议${skippedAccounts.length ? `，已跳过 ${skippedAccounts.length} 个已有标识账号` : ''}…</div>`;
+  renderedLogKey = '';
+  logAutoFollow = true;
+  activeBatchTaskType = 'protocol_detection';
+  batchJobs = [
+    ...skippedAccounts.map(({entry, record}) => ({
+      entry,
+      label: entry.label,
+      requestedMethod: 'paypal',
+      jobId: '',
+      status: 'skipped',
+      percent: 100,
+      text: `已检测 ${String(record.protocol || 'unknown').toUpperCase()} · DE/EUR`,
+      error: '',
+      result: {
+        detection_only: true,
+        link_type: 'paypal',
+        checkout_protocol: record.protocol,
+        checkout_country: 'DE',
+        checkout_currency: 'EUR'
+      },
+      logs: []
+    })),
+    ...pendingAccounts.map(entry => ({
+      entry,
+      label: entry.label,
+      requestedMethod: 'paypal',
+      jobId: '',
+      status: 'pending',
+      percent: 0,
+      text: '候补队列 · 等待并发槽位',
+      error: '',
+      result: null,
+      logs: []
+    }))
+  ];
+  renderBatchJobs();
+  setRunning(true, 'batch');
+  updateBatchAggregate();
+  await pumpBatchQueue();
+  renderBatchJobs();
+  updateBatchAggregate();
+  if (activeRunMode === 'batch' && batchJobs.some(job => !isTerminalJobStatus(job.status))) {
+    clearInterval(batchPollTimer);
+    await pollBatch();
+    if (activeRunMode === 'batch') batchPollTimer = setInterval(pollBatch, 1200);
+  }
 }
 
 async function startSingleCheckout(){
@@ -2190,7 +2602,15 @@ async function startSingleCheckout(){
   logAutoFollow = true;
   setRunning(true, 'single');
   setProgress(3, '提交任务', 'running');
-  const body = buildCheckoutBody($('token').value);
+  const submittedToken = String($('token').value || '').trim();
+  const submittedEntry = findAccountForToken(submittedToken, true);
+  singleJobBinding = {
+    entry: submittedEntry,
+    entryId: submittedEntry?.id || '',
+    requestedMethod: selected('link_type'),
+    token: submittedToken
+  };
+  const body = buildCheckoutBody(submittedToken);
   try{
     const r = await fetch('/api/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data = await r.json(); if(!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
@@ -2198,7 +2618,7 @@ async function startSingleCheckout(){
     if (data.queue_position > 0) setProgress(2, `任务已进入队列，当前第 ${data.queue_position} 位`, 'queued');
     clearInterval(pollTimer); await poll();
     if (activeRunMode === 'single') pollTimer=setInterval(poll,1200);
-  }catch(e){ setRunning(false); setProgress(100,e.message||String(e),'error'); }
+  }catch(e){ singleJobBinding = null; setRunning(false); setProgress(100,e.message||String(e),'error'); }
 }
 
 async function startBatchCheckout(){
@@ -2208,15 +2628,12 @@ async function startBatchCheckout(){
     setAccountImportStatus('请至少勾选 2 个有效账号后再并发提链', 'error');
     return;
   }
-  if (accounts.length > taskLimits.perIp) {
-    setAccountImportStatus(`当前 IP 每分钟最多创建 ${taskLimits.perIp} 个任务，本批请最多勾选 ${taskLimits.perIp} 个账号`, 'error');
-    setProgress(100, `批量任务超过当前 IP 限制：最多 ${taskLimits.perIp} 个`, 'error');
-    return;
-  }
   if (!validateFormForBatch() || !validateCheckoutOptions({batch:true})) return;
   resetProgress();
   $('resultPanel').hidden = true;
   $('batchPanel').hidden = false;
+  activeBatchTaskType = 'checkout';
+  if ($('batchPanelTitle')) $('batchPanelTitle').textContent = '并发提链';
   $('logBox').innerHTML = `<div class="empty-log">正在同时创建 ${accounts.length} 个账号任务…</div>`;
   renderedLogKey = '';
   logAutoFollow = true;
@@ -2224,35 +2641,18 @@ async function startBatchCheckout(){
     entry, label: entry.label, requestedMethod: selected('link_type'), jobId: '', status: 'creating', percent: 1,
     text: '正在创建任务', error: '', result: null, logs: []
   }));
+  batchJobs.forEach(job => {
+    job.status = 'pending';
+    job.percent = 0;
+    job.text = '候补队列 · 等待并发槽位';
+  });
   renderBatchJobs();
-  updateBatchAggregate();
   setRunning(true, 'batch');
-  const baseBody = buildCheckoutBody('');
-  await Promise.all(batchJobs.map(async job => {
-    try{
-      const response = await fetch('/api/checkout', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({...baseBody, token: job.entry.raw})
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-      job.jobId = String(data.job_id || '');
-      if (!job.jobId) throw new Error('服务未返回任务 ID');
-      job.status = 'queued';
-      job.percent = Number(data.queue_position) > 0 ? 2 : 3;
-      job.text = Number(data.queue_position) > 0 ? `排队中 · 前方 ${data.queue_position - 1} 个任务` : '等待执行';
-    }catch(error){
-      job.status = 'error';
-      job.percent = 100;
-      job.error = error.message || String(error);
-      job.text = '创建失败';
-      recordAccountOutcome(job.entry, {status: 'error', error: job.error}, job.requestedMethod);
-    }
-  }));
+  updateBatchAggregate();
+  await pumpBatchQueue();
   renderBatchJobs();
   updateBatchAggregate();
-  if (batchJobs.some(job => job.jobId && !isTerminalJobStatus(job.status)) && activeRunMode === 'batch') {
+  if (activeRunMode === 'batch' && batchJobs.some(job => !isTerminalJobStatus(job.status))) {
     clearInterval(batchPollTimer);
     await pollBatch();
     if (activeRunMode === 'batch') batchPollTimer = setInterval(pollBatch, 1200);
@@ -2274,14 +2674,27 @@ $('cancelButton').addEventListener('click', async () => {
   await fetch('/api/checkout-cancel',{
     method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:currentJobId})
   });
+  singleJobBinding = null;
 });
 
 $('batchCancelButton')?.addEventListener('click', async () => {
-  const pending = batchJobs.filter(job => job.jobId && !isTerminalJobStatus(job.status));
+  const pending = batchJobs.filter(job => !isTerminalJobStatus(job.status));
   if (!pending.length) return;
   clearInterval(batchPollTimer);
   batchPollTimer = 0;
-  await Promise.all(pending.map(job => cancelBatchJob(job)));
+  if (batchPumpTimer) {
+    clearTimeout(batchPumpTimer);
+    batchPumpTimer = 0;
+  }
+  pending.filter(job => !job.jobId).forEach(job => {
+    job.status = 'cancelled';
+    job.percent = 100;
+    job.text = '任务已停止';
+    job.error = '任务已停止';
+  });
+  await Promise.all(pending.filter(job => job.jobId).map(job => cancelBatchJob(job)));
+  renderBatchJobs();
+  updateBatchAggregate();
 });
 
 $('copyResult').addEventListener('click', async () => {

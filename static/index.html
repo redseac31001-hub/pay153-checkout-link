@@ -56,6 +56,8 @@
               <input id="accountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
               <button id="accountSelectAll" type="button" class="ghost-button account-toolbar-btn" disabled>全选可用</button>
               <button id="accountBatchRun" type="button" class="account-batch-button" disabled>并发提链（0）</button>
+              <button id="accountDetectProtocol" type="button" class="ghost-button account-toolbar-btn">检测 PayPal 协议（DE）</button>
+              <button id="accountBatchDetect" type="button" class="ghost-button account-toolbar-btn" disabled>批量检测协议（0）</button>
               <button id="accountClearAll" type="button" class="ghost-button account-toolbar-btn">清空列表</button>
               <span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span>
             </div>
@@ -268,7 +270,7 @@
         </section>
 
         <section id="batchPanel" class="panel batch-panel" hidden>
-          <div class="panel-heading"><div><span class="section-index">D</span><h2>并发提链</h2></div><span id="batchBadge" class="status-badge idle">等待</span></div>
+          <div class="panel-heading"><div><span class="section-index">D</span><h2 id="batchPanelTitle">并发提链</h2></div><span id="batchBadge" class="status-badge idle">等待</span></div>
           <div class="batch-summary"><b id="batchSummary">尚未选择批量任务</b><span>每个账号独立创建任务，结果互不覆盖。</span></div>
           <div id="batchJobList" class="batch-job-list"></div>
           <button id="batchCancelButton" class="secondary-button batch-cancel-button" type="button" hidden>停止全部任务</button>
@@ -278,6 +280,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260812-account-ui01"></script>
+  <script src="/static/app.js?v=20260812-account-ui03"></script>
 </body>
 </html>

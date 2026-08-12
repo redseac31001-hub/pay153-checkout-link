@@ -49,6 +49,27 @@ class PaypalFlowTests(unittest.TestCase):
         )
         self.assertIn("promo_campaign", card_payload)
 
+    def test_paypal_native_promo_is_explicitly_allowed_only_for_oaics_recovery(self):
+        options = {
+            "plan": "plus",
+            "link_type": "paypal",
+            "country": "BR",
+            "currency": "BRL",
+            "checkout_country": "BR",
+            "checkout_currency": "BRL",
+            "use_promo": True,
+            "promo_on_create": True,
+        }
+
+        probe_payload = app_module.checkout_payload(options, {"email": "customer@example.com"})
+        self.assertNotIn("promo_campaign", probe_payload)
+
+        native_payload = app_module.checkout_payload(
+            {**options, "allow_paypal_native_promo": True},
+            {"email": "customer@example.com"},
+        )
+        self.assertIn("promo_campaign", native_payload)
+
     def test_promo_not_applied_is_a_non_retryable_error(self):
         error = sc.PromoNotAppliedError("Plus 首月免费优惠未生效：Stripe 今日应付 amount=2000")
         self.assertEqual(error.error_code, sc.PROMO_NOT_APPLIED_ERROR_CODE)

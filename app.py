@@ -23,7 +23,7 @@ from flask import Flask, jsonify, request, send_from_directory, session
 from curl_cffi import requests
 
 from manage_defaults import DEFAULT_ASN_RECOMMENDATIONS
-from manage_store import ManageStore
+from manage_store import ManageStore, mask_account_id, mask_email
 import stripe_checkout as sc
 from provider_checkout import (
     PROVIDER_DEFAULTS,
@@ -31,6 +31,7 @@ from provider_checkout import (
     normalize_billing_profile,
     stripe_to_provider,
 )
+from oaics_api import oaics_context_headers, run_oaics_paypal_api_confirmation
 from sentinel_token import SentinelTokenProvider as BaseSentinel
 
 # 加载 .env 文件中的环境变量
@@ -98,20 +99,107 @@ _STRIPE_CHECKOUT_SESSION_RE = re.compile(
 )
 _OPENAI_CHECKOUT_SESSION_RE = re.compile(r"oaics_[A-Za-z0-9_]+")
 
+CHECKOUT_PROTOCOL_OAICS = "oaics"
+CHECKOUT_PROTOCOL_CS = "cs"
+CHECKOUT_PROTOCOL_UNKNOWN = "unknown"
+CHECKOUT_PROTOCOL_HINT_TTL_SECONDS = max(
+    300, int(os.getenv("PAY153_CHECKOUT_PROTOCOL_TTL", "86400") or 86400)
+)
+
 CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
 OAICS_CONVERSION_FAILED_ERROR_CODE = "oaics_conversion_failed_retry"
+OAICS_BA_CONFIRM_FAILED_ERROR_CODE = "oaics_ba_confirm_retry"
 PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE = "paypal_generic_decline_fuse"
 PROMO_NOT_APPLIED_ERROR_CODE = sc.PROMO_NOT_APPLIED_ERROR_CODE
 ACCOUNT_BLOCK_FUSE_ERROR_CODE = "account_blocked_fuse"
 ACCOUNT_BLOCK_STREAK_LIMIT = max(
     1, int(os.getenv("PAY153_ACCOUNT_BLOCK_STREAK", "3") or 3)
 )
-MAX_OAICS_RETRY = 0  # OpenAI 已全面切换到 oaics_*，禁用重试以节省时间
+MAX_OAICS_RETRY = max(
+    0, int(os.getenv("PAY153_MAX_OAICS_RETRY", "2") or 2)
+)
 # 连续同类 PayPal 风控拒绝达到该次数后结束任务（非官方冷却时长，仅为工程降频）。
 # Stripe/PayPal 公开文档未给出 generic_decline 固定等待分钟数。
 PAYPAL_GENERIC_DECLINE_STREAK_LIMIT = max(
     1, int(os.getenv("PAYPAL_GENERIC_DECLINE_STREAK", "3") or 3)
 )
+
+
+def normalize_checkout_protocol(value: Any) -> str:
+    """Normalize the public protocol marker without exposing raw session IDs."""
+    normalized = str(value or "").strip().lower()
+    if normalized in {CHECKOUT_PROTOCOL_OAICS, CHECKOUT_PROTOCOL_CS}:
+        return normalized
+    return CHECKOUT_PROTOCOL_UNKNOWN
+
+
+def checkout_protocol_from_payload(payload: Any) -> str:
+    """Classify a Checkout response as OpenAI-managed, Stripe, or unknown.
+
+    Stripe IDs win when a response contains both an ``oaics_*`` source ID and
+    a nested ``cs_*`` payment-page ID.  This mirrors the existing materialize
+    path and keeps the account marker aligned with the session used downstream.
+    """
+    if not isinstance(payload, dict):
+        return CHECKOUT_PROTOCOL_UNKNOWN
+
+    candidates: list[Any] = [
+        payload.get("checkout_session_id"),
+        payload.get("stripe_checkout_session_id"),
+        payload.get("openai_checkout_session_id"),
+        payload.get("url"),
+        payload.get("checkout_url"),
+        payload.get("return_url"),
+    ]
+    nested = payload.get("checkout_session")
+    if isinstance(nested, dict):
+        candidates.extend((
+            nested.get("checkout_session_id"),
+            nested.get("stripe_checkout_session_id"),
+            nested.get("url"),
+            nested.get("checkout_url"),
+            nested.get("return_url"),
+        ))
+
+    for candidate in candidates:
+        candidate_text = str(candidate or "").strip()
+        if is_stripe_checkout_session_id(candidate) or _STRIPE_CHECKOUT_SESSION_RE.search(candidate_text):
+            return CHECKOUT_PROTOCOL_CS
+    for candidate in candidates:
+        candidate_text = str(candidate or "").strip()
+        if is_openai_checkout_session_id(candidate) or _OPENAI_CHECKOUT_SESSION_RE.search(candidate_text):
+            return CHECKOUT_PROTOCOL_OAICS
+    return CHECKOUT_PROTOCOL_UNKNOWN
+
+
+def checkout_protocol_hint_matches(options: dict[str, Any], now: float | None = None) -> bool:
+    """Validate a client-side protocol marker before using it for routing.
+
+    Exact region markers are preferred.  A fresh DE/EUR marker may be sent as
+    a baseline for another PayPal region, but it remains advisory: the actual
+    Checkout response is always recorded as the authoritative marker.
+    """
+    protocol = normalize_checkout_protocol(options.get("checkout_protocol_hint"))
+    if protocol == CHECKOUT_PROTOCOL_UNKNOWN:
+        return False
+    try:
+        checked_at = float(options.get("checkout_protocol_hint_checked_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    if checked_at > 10_000_000_000:
+        checked_at /= 1000
+    current_time = float(now if now is not None else time.time())
+    if checked_at <= 0 or current_time - checked_at > CHECKOUT_PROTOCOL_HINT_TTL_SECONDS:
+        return False
+    hint_country = str(options.get("checkout_protocol_hint_country") or "").strip().upper()
+    hint_currency = str(options.get("checkout_protocol_hint_currency") or "").strip().upper()
+    target_country = str(options.get("checkout_country") or options.get("country") or "").strip().upper()
+    target_currency = str(options.get("checkout_currency") or options.get("currency") or "").strip().upper()
+    exact_scope = hint_country == target_country and hint_currency == target_currency
+    de_baseline = bool(options.get("checkout_protocol_hint_baseline")) and (
+        hint_country == "DE" and hint_currency == "EUR"
+    )
+    return bool(exact_scope or de_baseline)
 
 
 class CheckoutSessionContractError(RuntimeError):
@@ -124,6 +212,12 @@ class OaicsConversionFailedError(RuntimeError):
     """当 oaics_* 无法转换为 cs_live_* 时抛出，触发外层重试逻辑。"""
 
     error_code = OAICS_CONVERSION_FAILED_ERROR_CODE
+
+
+class OaicsBaConfirmFailedError(RuntimeError):
+    """OAICS 原生 PayPal confirm 未生成 BA 链接，触发外层重试。"""
+
+    error_code = OAICS_BA_CONFIRM_FAILED_ERROR_CODE
 
 
 class PaypalGenericDeclineFuseError(RuntimeError):
@@ -807,7 +901,10 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
         link_type not in {"pix", "paypal", "upi", "ideal", "gopay"}
         or (
             options.get("promo_on_create")
-            and link_type != "paypal"
+            and (
+                link_type != "paypal"
+                or options.get("allow_paypal_native_promo")
+            )
         )
     ):
         common["promo_campaign"] = {
@@ -817,7 +914,17 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
     return common
 
 
-def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: str, log) -> dict:
+def create_checkout(
+    token: str,
+    payload: dict,
+    proxy: str,
+    device_id: str,
+    did: str,
+    log,
+    *,
+    oai_session_id: str = "",
+    oaics_country: str = "",
+) -> dict:
     http = sc.build_http(proxy or None)
     try:
         http.cookies.set("oai-did", did, domain="chatgpt.com")
@@ -840,6 +947,24 @@ def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: 
         "OAI-Device-Id": device_id,
         **s_headers,
     }
+    if oai_session_id:
+        request_country = str(
+            oaics_country
+            or ((payload.get("billing_details") or {}).get("country") if isinstance(payload, dict) else "")
+            or "US"
+        ).upper()
+        headers.pop("OAI-Device-Id", None)
+        headers.update(
+            oaics_context_headers(
+                country=request_country,
+                device_id=device_id,
+                oai_session_id=oai_session_id,
+                referer="https://chatgpt.com/",
+            )
+        )
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "*/*"
     resp = http.post(sc.OPENAI_CHECKOUT_URL, json=payload, headers=headers, timeout=60)
     text = resp.text or ""
     if resp.status_code != 200:
@@ -1275,6 +1400,78 @@ class JobStore:
         except Exception:
             pass
 
+    def _record_oaics_fallback(
+        self,
+        job_id: str,
+        options: dict,
+        meta: dict,
+        checkout_data: dict,
+        session_id: str,
+        processor_entity: str,
+        payment_methods: list[str],
+    ) -> dict:
+        """Save an OAICS browser fallback before attempting conversion/retry."""
+        managed_url = openai_managed_checkout_url(
+            checkout_data, session_id, processor_entity
+        )
+        if not managed_url:
+            return {}
+        fallback = {
+            "status": "pending",
+            "session_id": session_id,
+            "checkout_url": managed_url,
+            "payment_methods": list(payment_methods or []),
+            "paypal_available": "paypal" in (payment_methods or []),
+            "attempt": options.get("_attempt"),
+            "max_attempts": options.get("_max_attempts"),
+        }
+        record = {
+            "job_id": job_id,
+            "status": "pending",
+            "link_type": options.get("link_type") or "",
+            "plan": options.get("plan") or "",
+            "country": options.get("checkout_country") or options.get("country") or "",
+            "currency": options.get("checkout_currency") or options.get("currency") or "",
+            "account_email": meta.get("email") or "",
+            "account_id": meta.get("account_id") or "",
+            "session_id": session_id,
+            "processor_entity": processor_entity,
+            "payment_methods": list(payment_methods or []),
+            "url": managed_url,
+            "attempt": options.get("_attempt"),
+            "max_attempts": options.get("_max_attempts"),
+        }
+        try:
+            MANAGE_STORE.record_oaics_fallback(record)
+        except Exception as exc:
+            self.log(job_id, f"OAICS 临时链接持久化失败：{type(exc).__name__}")
+        self.update(job_id, oaics_fallback=fallback)
+        self.log(
+            job_id,
+            f"OAICS 临时链接已保存：session={session_id[:32]}，"
+            f"methods={payment_methods or ['未暴露']}，等待原生 confirm/重试",
+        )
+        return fallback
+
+    def _finalize_oaics_fallback(self, job_id: str, result: dict) -> None:
+        fallback = result.get("oaics_fallback")
+        if not isinstance(fallback, dict) or not fallback:
+            return
+        is_managed = result.get("checkout_flow") == "openai_managed"
+        status = "used_as_fallback" if is_managed else "superseded"
+        fallback = dict(fallback)
+        fallback["status"] = status
+        result["oaics_fallback"] = fallback
+        result["oaics_fallback_status"] = status
+        try:
+            MANAGE_STORE.finalize_oaics_fallback(
+                job_id,
+                status,
+                "" if is_managed else result.get("checkout_session_id") or "",
+            )
+        except Exception as exc:
+            self.log(job_id, f"OAICS 临时链接状态更新失败：{type(exc).__name__}")
+
     def _refresh_queue_locked(self):
         for position, (job_id, _options) in enumerate(self.pending, 1):
             job = self.jobs.get(job_id)
@@ -1447,12 +1644,17 @@ class JobStore:
         paypal_force_de_fallback = False
         paypal_decline_streak = 0
         account_block_streak = 0
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        normal_attempts = 0
+        while normal_attempts < max_attempts:
+            attempt += 1
             if self.cancelled(job_id):
                 self.update(job_id, status="cancelled", percent=100, text="任务已停止", error="任务已停止")
                 return
             current = dict(options)
             current["retry_wrapper"] = True
+            current["_attempt"] = attempt
+            current["_max_attempts"] = max_attempts
             entry_pool = current["entry_proxies"]
             exit_pool = current.get("exit_proxies") or entry_pool
             pair = None
@@ -1470,12 +1672,18 @@ class JobStore:
             used_pairs.add(pair)
             current["fixed_entry_proxy"], current["fixed_exit_proxy"] = pair
             if current.get("link_type") == "paypal":
-                current["force_paypal_de_fallback"] = paypal_force_de_fallback
+                current["force_paypal_de_fallback"] = bool(
+                    paypal_force_de_fallback
+                    or (
+                        current.get("detection_only")
+                        and current.get("detection_fixed_de", True)
+                    )
+                )
                 # A zero-due Checkout created with the campaign attached can
                 # remove PayPal from Stripe's available payment methods. Keep
                 # PayPal in the initial Checkout, then apply the campaign via
                 # checkout/update and verify that Stripe reaches amount=0.
-                # 所有重试都使用后置优惠；不能在后续轮次重新创建零金额 Checkout。
+                # 普通重试使用后置优惠；协议检测任务不携带优惠。
                 current["promo_on_create"] = False
             if current.get("link_type") in {"pix", "upi"}:
                 # Alternate both Stripe submission shapes across outer retries.
@@ -1513,25 +1721,36 @@ class JobStore:
                     result = state["result"]
                     result["attempt"] = attempt
                     result["max_attempts"] = max_attempts
+                    if not result.get("detection_only"):
+                        self._finalize_oaics_fallback(job_id, result)
                     self.update(job_id, result=result)
-                    self._record_success(job_id, result)
+                    if not result.get("detection_only"):
+                        if result.get("checkout_flow") != "openai_managed":
+                            self._record_success(job_id, result)
                 return
             last_error = str(state.get("error") or "")
             lowered = last_error.lower()
             error_code = str(state.get("error_code") or "")
 
-            # oaics 转换失败是可重试的，需要递增计数器
-            if error_code == OAICS_CONVERSION_FAILED_ERROR_CODE:
+            # OAICS 原生确认/旧转换失败都不计入普通 retry_count，先按
+            # OAICS 专用计数器换代理并创建全新 Checkout。
+            if error_code in {
+                OAICS_CONVERSION_FAILED_ERROR_CODE,
+                OAICS_BA_CONFIRM_FAILED_ERROR_CODE,
+            }:
                 current_oaics_retry = current.get("_oaics_retry_count", 0)
-                current["_oaics_retry_count"] = current_oaics_retry + 1
+                options["_oaics_retry_count"] = current_oaics_retry + 1
                 self.log(
                     job_id,
                     f"[oaics 重试 {current_oaics_retry + 1}/{MAX_OAICS_RETRY}] "
-                    "换用新代理池重新创建 Checkout"
+                    "换用新代理池重新创建 Checkout；"
+                    + ("原因=原生 confirm 未生成 BA" if error_code == OAICS_BA_CONFIRM_FAILED_ERROR_CODE else "原因=旧协议未得到 cs_*")
                 )
                 # 不计入 max_attempts，直接重试
                 time.sleep(1.5)
                 continue
+
+            normal_attempts += 1
 
             if is_account_block_error(last_error, error_code):
                 account_block_streak += 1
@@ -1596,7 +1815,7 @@ class JobStore:
                 "access token", "token_invalidated", "token_expired", "token_revoked", "jwt expired",
                 "计划类型", "提取方式", "任务已停止", "所选 paypal 账单地址国家",
             ))
-            if non_retryable or attempt >= max_attempts:
+            if non_retryable or normal_attempts >= max_attempts:
                 self.update(
                     job_id,
                     status="error",
@@ -1625,6 +1844,11 @@ class JobStore:
         try:
             self.update(job_id, status="running", percent=6, text="解析 Access Token")
             token, meta = extract_access_token(options.pop("token_raw"))
+            self.log(
+                job_id,
+                f"任务绑定账号：email={mask_email(meta.get('email') or '') or '-'}，"
+                f"account_id={mask_account_id(meta.get('account_id') or '') or '-'}",
+            )
             self.ensure_not_cancelled(job_id)
             provider = options["link_type"]
             country = options["country"]
@@ -1660,6 +1884,9 @@ class JobStore:
             # use a fresh browser/device identity.  Within this single attempt
             # the same ids are kept for create -> update -> approve.
             device_id, did = str(uuid.uuid4()), str(uuid.uuid4())
+            # One stable ChatGPT page-session id is shared by create, taxes and
+            # confirm within this attempt; the outer retry gets a fresh one.
+            oai_session_id = str(uuid.uuid4())
 
             if provider == "pix":
                 self.update(job_id, percent=9, text="第 1/7 步：选择并检测代理")
@@ -1692,7 +1919,14 @@ class JobStore:
                 if rejected_countries:
                     self.log(job_id, f"PayPal 已跳过不兼容地区：{'/'.join(rejected_countries[:8])}")
                 detected_currency = str(payment_geo.get("currency") or "").upper()
-                if options.get("force_paypal_de_fallback"):
+                force_paypal_de = bool(
+                    options.get("force_paypal_de_fallback")
+                    or (
+                        options.get("detection_only")
+                        and options.get("detection_fixed_de", True)
+                    )
+                )
+                if force_paypal_de:
                     checkout_country, checkout_currency, currency_source = (
                         "DE", "EUR", f"\u5f53\u524d\u56fd\u5bb6 {payment_country} \u5b9e\u6d4b\u672a\u5f00\u653e PayPal\uff0c\u4f7f\u7528 DE/EUR \u56de\u9000",
                     )
@@ -1700,6 +1934,8 @@ class JobStore:
                     checkout_country, checkout_currency, currency_source = normalize_paypal_checkout_region(
                         payment_country, detected_currency,
                     )
+                if options.get("detection_only") and force_paypal_de:
+                    currency_source = "协议检测固定使用 DE/EUR 基线"
                 country = checkout_country
                 options["country"] = checkout_country
                 options["currency"] = checkout_currency
@@ -1709,7 +1945,7 @@ class JobStore:
                 paypal_billing_country = paypal_billing_target_country(
                     checkout_country,
                     payment_country,
-                    force_checkout_country=bool(options.get("force_paypal_de_fallback")),
+                    force_checkout_country=force_paypal_de,
                 )
                 options["paypal_billing_country"] = paypal_billing_country
                 selected_paypal_profile = options.get("paypal_billing_profile") or None
@@ -1736,6 +1972,32 @@ class JobStore:
                 if promo_requested and main_country not in {"TR", "JP"}:
                     self.log(job_id, f"PayPal 优惠识别代理当前为 {main_country or '?'}；不限制国家，继续尝试")
                 self.ensure_not_cancelled(job_id)
+            options["checkout_protocol_hint_used"] = ""
+            if (
+                provider == "paypal"
+                and promo_requested
+                and not options.get("detection_only")
+                and checkout_protocol_hint_matches(options)
+            ):
+                hint = normalize_checkout_protocol(options.get("checkout_protocol_hint"))
+                options["checkout_protocol_hint_used"] = hint
+                if hint == CHECKOUT_PROTOCOL_OAICS:
+                    options["promo_on_create"] = True
+                    options["allow_paypal_native_promo"] = True
+                    options["_oaics_native_promo_used"] = True
+                    options["oaics_native_promo_used"] = True
+                    options["promo_preapplied"] = True
+                    self.log(
+                        job_id,
+                        "账号协议标识命中 OAICS（DE/EUR 基线或当前地区）；"
+                        "本次首次 Checkout 直接携带原生优惠",
+                    )
+                else:
+                    options["promo_on_create"] = False
+                    self.log(
+                        job_id,
+                        "账号协议标识命中 CS；本次先创建 Checkout，优惠走后置更新",
+                    )
             if provider == "upi":
                 self.update(job_id, percent=9, text="第 1/7 步：校验 UPI 优惠识别代理与印度支付代理")
                 entry_geo = proxy_geo_cached(entry_proxy)
@@ -1830,11 +2092,21 @@ class JobStore:
                 self.log(job_id, "Gopay 设置：代理池 1（TH）仅用于优惠更新，代理池 2（ID）创建 ID/IDR Checkout 并贯穿 Stripe 支付处理")
             elif provider != "hosted":
                 self.log(job_id, f"Checkout 将使用所选的 {country} 地区代理")
-            created = create_checkout(token, payload, checkout_proxy, device_id, did, lambda m: self.log(job_id, m))
+            created = create_checkout(
+                token,
+                payload,
+                checkout_proxy,
+                device_id,
+                did,
+                lambda m: self.log(job_id, m),
+                oai_session_id=oai_session_id,
+                oaics_country=str(options.get("checkout_country") or country or "US"),
+            )
             self.ensure_not_cancelled(job_id)
             self.update(job_id, percent=44, text="Checkout 创建完成，正在准备支付方式")
             checkout_data = created["data"]
             chatgpt_http = created["http"]
+            options["_initial_checkout_protocol"] = checkout_protocol_from_payload(checkout_data)
             stage1_campaign = promo_campaign_from_payload(checkout_data)
             if checkout_data.get("one_click_trial_eligible") is True:
                 options["promo_marker_eligible"] = True
@@ -1842,6 +2114,65 @@ class JobStore:
                 options["promo_campaign"] = stage1_campaign
                 options["promo_campaign_verified"] = True
                 self.log(job_id, f"Checkout 已返回活动标识：{stage1_campaign}")
+            if options.get("detection_only"):
+                detected_protocol = checkout_protocol_from_payload(checkout_data)
+                detected_methods = extract_checkout_payment_methods(checkout_data)
+                detected_at = int(time.time() * 1000)
+                detection_country = options.get("checkout_country") or country
+                detection_currency = options.get("checkout_currency") or options.get("currency")
+                detection_result: dict[str, Any] = {
+                    "detection_only": True,
+                    "link_type": provider,
+                    "plan": options["plan"],
+                    "account_email": meta.get("email") or "",
+                    "account_id": meta.get("account_id") or "",
+                    "country": country,
+                    "currency": options.get("currency") or "",
+                    "checkout_country": detection_country,
+                    "checkout_currency": detection_currency,
+                    "checkout_protocol": detected_protocol,
+                    "checkout_protocol_country": detection_country,
+                    "checkout_protocol_currency": detection_currency,
+                    "checkout_protocol_scope": f"paypal:{detection_country}:{detection_currency}",
+                    "checkout_protocol_baseline": bool(
+                        options.get("detection_fixed_de")
+                        and detection_country == "DE"
+                        and detection_currency == "EUR"
+                    ),
+                    "checkout_protocol_source": "fixed_de" if options.get("detection_fixed_de") else "proxy_region",
+                    "checkout_protocol_checked_at": detected_at,
+                    "payment_method_types": detected_methods,
+                    "oaics_payment_method_types": detected_methods if detected_protocol == CHECKOUT_PROTOCOL_OAICS else [],
+                    "oaics_paypal_available": "paypal" in detected_methods,
+                    "entry_country": str(entry_geo.get("country") or locals().get("main_country") or "").upper(),
+                    "entry_region": str(entry_geo.get("region") or locals().get("main_region") or ""),
+                    "payment_proxy_country": str(payment_geo.get("country") or locals().get("payment_country") or "").upper(),
+                    "payment_region": str(payment_geo.get("region") or locals().get("payment_region") or ""),
+                    "proxy_mode": "dual_chain",
+                    "promo_requested": False,
+                    "promo_strategy": "protocol_detection",
+                    "promo_applied": None,
+                    "checkout_session_id": "",
+                    "checkout_url": "",
+                }
+                self.log(
+                    job_id,
+                    f"PayPal 协议检测完成：{detected_protocol}；"
+                    f"scope={detection_country}/{detection_currency}；"
+                    f"methods={detected_methods or ['未暴露']}；不生成最终链接",
+                )
+                try:
+                    chatgpt_http.close()
+                except Exception:
+                    pass
+                self.update(
+                    job_id,
+                    percent=100,
+                    text=f"PayPal 协议检测完成：{detected_protocol}",
+                    status="done",
+                    result=detection_result,
+                )
+                return
             provider_chatgpt_http = chatgpt_http
             promo_chatgpt_http = chatgpt_http
             if provider in {"paypal", "upi", "ideal", "gopay"}:
@@ -1854,7 +2185,11 @@ class JobStore:
                 except Exception as exc:
                     self.log(job_id, f"{provider.upper()} 优惠线路暖身提示：{type(exc).__name__}")
                 if provider == "paypal":
-                    self.log(job_id, f"PayPal 支付处理使用代理池 2（{country}）")
+                    self.log(
+                        job_id,
+                        f"PayPal 支付处理使用代理池 2（{payment_country or '未知'}）；"
+                        f"Checkout={country}",
+                    )
                 elif provider == "upi":
                     self.log(job_id, "UPI 支付处理使用代理池 2（IN）")
                 elif provider == "gopay":
@@ -1872,6 +2207,83 @@ class JobStore:
                 else []
             )
             options["_oaics_payment_methods"] = oaics_payment_methods
+            oaics_fallback = None
+            if (
+                has_oaics_session
+                and provider == "paypal"
+                and promo_requested
+                and not options.get("_oaics_native_promo_used")
+            ):
+                # The first request is deliberately a protocol probe.  Once
+                # OpenAI tells us it is using an OAICS session, recreate the
+                # Checkout with the campaign attached at creation time.  The
+                # original OAICS URL remains saved as a temporary fallback.
+                initial_processor_entity = str(
+                    checkout_data.get("processor_entity")
+                    or checkout_data.get("processor")
+                    or ""
+                ).strip()
+                if not initial_processor_entity:
+                    initial_processor_entity = sc._entity_from_return_url(
+                        str(checkout_data.get("return_url") or checkout_data.get("url") or "")
+                    )
+                initial_oaics_session_id = str(session_id)
+                if initial_processor_entity:
+                    oaics_fallback = self._record_oaics_fallback(
+                        job_id,
+                        options,
+                        meta,
+                        checkout_data,
+                        initial_oaics_session_id,
+                        initial_processor_entity,
+                        oaics_payment_methods,
+                    )
+                native_options = dict(options)
+                native_options["promo_on_create"] = True
+                native_options["allow_paypal_native_promo"] = True
+                native_options["_oaics_native_promo_used"] = True
+                native_payload = checkout_payload(native_options, meta)
+                self.log(
+                    job_id,
+                    f"首次 Checkout 检测到 OAICS {initial_oaics_session_id[:32]}；"
+                    f"保留当前 {options.get('checkout_country')}/{options.get('checkout_currency')}，"
+                    "重新创建原生携带优惠 Checkout",
+                )
+                native_created = create_checkout(
+                    token,
+                    native_payload,
+                    checkout_proxy,
+                    device_id,
+                    did,
+                    lambda m: self.log(job_id, m),
+                    oai_session_id=oai_session_id,
+                    oaics_country=str(options.get("checkout_country") or country or "US"),
+                )
+                self.ensure_not_cancelled(job_id)
+                checkout_data = native_created["data"]
+                chatgpt_http = native_created["http"]
+                provider_chatgpt_http = chatgpt_http
+                native_campaign = promo_campaign_from_payload(checkout_data)
+                if native_campaign:
+                    options["promo_campaign"] = native_campaign
+                    options["promo_campaign_verified"] = True
+                options["promo_preapplied"] = True
+                options["oaics_native_promo_used"] = True
+                session_id = checkout_data.get("checkout_session_id") or ""
+                has_oaics_session = is_openai_checkout_session_id(session_id)
+                oaics_payment_methods = (
+                    extract_checkout_payment_methods(checkout_data)
+                    if has_oaics_session
+                    else []
+                )
+                options["_oaics_payment_methods"] = oaics_payment_methods
+                self.log(
+                    job_id,
+                    "OAICS 原生优惠 Checkout 响应："
+                    f"协议={'oaics_*' if has_oaics_session else ('cs_*' if is_stripe_checkout_session_id(session_id) else '未知')}，"
+                    f"methods={oaics_payment_methods or ['未暴露']}，"
+                    f"campaign={'已返回' if native_campaign else '未暴露'}",
+                )
             if session_id and not is_stripe_checkout_session_id(session_id):
                 # Do not pass an oaics_* OpenAI-owned ID to Stripe's
                 # /v1/payment_pages/<id>/init.  If OpenAI does not expose a
@@ -1893,8 +2305,144 @@ class JobStore:
                         "Checkout 返回 OpenAI 内部 Session，但缺少 processor_entity，无法换取 Stripe Session"
                     )
                 openai_session_id = str(session_id)
+                oaics_fallback = self._record_oaics_fallback(
+                    job_id,
+                    options,
+                    meta,
+                    checkout_data,
+                    openai_session_id,
+                    processor_entity,
+                    oaics_payment_methods,
+                )
                 materialized: dict[str, Any] = {}
-                if promo_requested:
+                # OAICS 的 PayPal 路径直接使用官方页面的
+                # confirmation_tokens -> checkout/confirm 协议。这里不再把
+                # oaics_* 强行转换为 cs_*，也不调用 Stripe payment_page。
+                if provider == "paypal":
+                    managed_url = openai_managed_checkout_url(
+                        checkout_data, openai_session_id, processor_entity
+                    )
+                    if not managed_url:
+                        raise checkout_session_contract_error(
+                            checkout_data, "OpenAI managed Checkout"
+                        )
+                    oaics_billing_country = str(
+                        options.get("paypal_billing_country") or country
+                    ).upper()
+                    oaics_profile = options.get("paypal_billing_profile") or None
+                    oaics_geo = payment_geo if (
+                        str(payment_geo.get("country") or "").upper()
+                        == oaics_billing_country
+                    ) else None
+                    oaics_billing = default_billing(
+                        oaics_billing_country,
+                        meta.get("email") or "",
+                        geo=oaics_geo,
+                        real_random=True,
+                        billing_profile=oaics_profile,
+                    )
+                    self.log(
+                        job_id,
+                        "OAICS PayPal 使用本地 HTTP confirmation_tokens → checkout/confirm；"
+                        "Stripe 与 OpenAI confirm 复用支付代理链（9697 第一跳），不启动浏览器",
+                    )
+                    try:
+                        oaics_sentinel_headers = asyncio.run(
+                            sentinel_headers(
+                                exit_proxy,
+                                "checkout_session_approval",
+                                device_id,
+                                did,
+                            )
+                        )
+                        oaics_result = run_oaics_paypal_api_confirmation(
+                            http=chatgpt_http,
+                            checkout_data=checkout_data,
+                            checkout_url=managed_url,
+                            session_id=openai_session_id,
+                            billing=oaics_billing,
+                            currency=str(
+                                options.get("checkout_currency")
+                                or options.get("currency")
+                                or ""
+                            ),
+                            payment_methods=oaics_payment_methods,
+                            device_id=device_id,
+                            language=str(
+                                sc._profile(str(country)).get("browser_language")
+                                or "en-US"
+                            ),
+                            sentinel_headers=oaics_sentinel_headers,
+                            access_token=token,
+                            processor_entity=processor_entity,
+                            country=str(country or "DE"),
+                            oai_session_id=oai_session_id,
+                            require_zero=bool(promo_requested),
+                            sentinel_headers_factory=lambda: asyncio.run(
+                                sentinel_headers(
+                                    exit_proxy,
+                                    "checkout_session_approval",
+                                    device_id,
+                                    did,
+                                )
+                            ),
+                            log=lambda message: self.log(job_id, message),
+                        )
+                    except Exception as exc:
+                        oaics_result = {
+                            "status": "api_error",
+                            "error": str(exc),
+                            "ba_url": "",
+                            "confirmation_token_present": False,
+                            "confirm_status": "",
+                        }
+                    options["_oaics_ba_result"] = oaics_result
+                    ba_url = str(oaics_result.get("ba_url") or "").strip()
+                    if ba_url:
+                        options["oaics_ba_url"] = ba_url
+                        options["_oaics_ba_handled"] = True
+                        session_id = openai_session_id
+                        checkout_data["checkout_session_id"] = session_id
+                        checkout_data["openai_checkout_session_id"] = session_id
+                        checkout_data["checkout_url"] = managed_url
+                        checkout_data["processor_entity"] = processor_entity
+                        self.log(
+                            job_id,
+                            "OAICS 原生 PayPal confirm 成功；已捕获 agreements/approve 链接，"
+                            "不再进入 cs_* 转换或 Stripe payment_page",
+                        )
+                    else:
+                        status = str(oaics_result.get("status") or "unknown")
+                        detail = str(oaics_result.get("error") or status)
+                        self.log(
+                            job_id,
+                            f"OAICS 原生 PayPal confirm 未生成 BA：status={status}；{detail[:220]}",
+                        )
+                        current_oaics_retry = int(options.get("_oaics_retry_count", 0) or 0)
+                        if current_oaics_retry < MAX_OAICS_RETRY:
+                            self.log(
+                                job_id,
+                                f"OAICS BA confirm 失败（第 {current_oaics_retry + 1} 次尝试），"
+                                f"将自动重试新 OAICS 流程（剩余 {MAX_OAICS_RETRY - current_oaics_retry} 次）",
+                            )
+                            raise OaicsBaConfirmFailedError(
+                                f"OAICS checkout/confirm 未生成 PayPal BA（status={status}；{detail[:180]}）"
+                            )
+                        self.log(
+                            job_id,
+                            f"OAICS BA confirm 已尝试 {current_oaics_retry + 1} 次，"
+                            "回退官方 OAICS 结账页",
+                        )
+                        session_id = openai_session_id
+                        checkout_data["checkout_session_id"] = session_id
+                        checkout_data["openai_checkout_session_id"] = session_id
+                        checkout_data["checkout_url"] = managed_url
+                        checkout_data["processor_entity"] = processor_entity
+                        options["openai_managed_checkout"] = True
+                        options["promo_update_accepted"] = False
+                        options["_oaics_ba_handled"] = True
+
+                if promo_requested and not options.get("promo_preapplied") and not options.get("_oaics_ba_handled"):
                     self.log(
                         job_id,
                         f"Checkout 返回 OpenAI 内部 Session {openai_session_id[:32]}，"
@@ -1921,6 +2469,16 @@ class JobStore:
                     if method not in oaics_payment_methods:
                         oaics_payment_methods.append(method)
                 options["_oaics_payment_methods"] = oaics_payment_methods
+                if oaics_fallback and not options.get("_oaics_ba_handled"):
+                    oaics_fallback = self._record_oaics_fallback(
+                        job_id,
+                        options,
+                        meta,
+                        checkout_data,
+                        openai_session_id,
+                        processor_entity,
+                        oaics_payment_methods,
+                    )
                 self.log(
                     job_id,
                     "OAICS 支付方式识别（脱敏）："
@@ -1937,7 +2495,7 @@ class JobStore:
                         job_id,
                         f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
                     )
-                else:
+                elif not options.get("_oaics_ba_handled"):
                     # An OAICS response may advertise PayPal without exposing
                     # a Stripe payment_page.  Do not invent a private
                     # custom_payment_method/start request from that capability
@@ -1995,6 +2553,11 @@ class JobStore:
             if self.cancelled(job_id):
                 raise InterruptedError("任务已停止")
 
+            actual_checkout_protocol = checkout_protocol_from_payload({
+                **checkout_data,
+                "checkout_session_id": session_id,
+            })
+            actual_protocol_checked_at = int(time.time() * 1000)
             result: dict[str, Any] = {
                 "plan": options["plan"],
                 "link_type": provider,
@@ -2027,11 +2590,46 @@ class JobStore:
                 "payment_city": str(payment_geo.get("city") or ""),
                 "oaics_retry_count": options.get("_oaics_retry_count", 0),
                 "oaics_retry_success": bool(
-                    options.get("_oaics_retry_count", 0) > 0 and is_stripe_checkout_session_id(session_id)
+                    options.get("_oaics_retry_count", 0) > 0
+                    and (
+                        is_stripe_checkout_session_id(session_id)
+                        or bool(options.get("oaics_ba_url"))
+                    )
                 ),
                 "oaics_payment_method_types": list(options.get("_oaics_payment_methods") or []),
                 "oaics_paypal_available": "paypal" in (options.get("_oaics_payment_methods") or []),
+                "oaics_fallback": oaics_fallback or None,
+                "checkout_protocol": actual_checkout_protocol,
+                "checkout_protocol_initial": options.get("_initial_checkout_protocol") or actual_checkout_protocol,
+                "checkout_protocol_country": options.get("checkout_country") or country,
+                "checkout_protocol_currency": options.get("checkout_currency") or options.get("currency") or "",
+                "checkout_protocol_scope": (
+                    f"paypal:{options.get('checkout_country') or country}:"
+                    f"{options.get('checkout_currency') or options.get('currency') or ''}"
+                    if provider == "paypal" else ""
+                ),
+                "checkout_protocol_checked_at": actual_protocol_checked_at,
+                "checkout_protocol_hint": options.get("checkout_protocol_hint_used") or "",
+                "checkout_protocol_hint_used": bool(options.get("checkout_protocol_hint_used")),
+                "promo_strategy": (
+                    "native_after_oaics"
+                    if options.get("oaics_native_promo_used")
+                    else ("post_checkout" if promo_requested else "none")
+                ),
+                "promo_preapplied": bool(options.get("promo_preapplied")),
             }
+            oaics_result = options.get("_oaics_ba_result")
+            if isinstance(oaics_result, dict):
+                result.update({
+                    "oaics_ba_status": oaics_result.get("status") or "unknown",
+                    "oaics_confirmation_token_present": bool(
+                        oaics_result.get("confirmation_token_present")
+                    ),
+                    "oaics_confirmation_http_status": oaics_result.get("confirmation_http_status"),
+                    "oaics_confirm_http_status": oaics_result.get("confirm_http_status"),
+                    "oaics_confirm_status": oaics_result.get("confirm_status") or "",
+                    "oaics_ba_error": str(oaics_result.get("error") or "")[:240],
+                })
             if promo_requested:
                 checkout_trial = checkout_data.get("one_click_trial_eligible")
                 self.log(
@@ -2045,6 +2643,35 @@ class JobStore:
                         job_id,
                         "Stage1 one_click 标记为 false；该字段不代表活动资格，继续以金额与 approval 结果判定",
                     )
+            if options.get("oaics_ba_url"):
+                oaics_result = options.get("_oaics_ba_result") or {}
+                ba_url = str(options.get("oaics_ba_url") or "")
+                result.update({
+                    "provider": provider,
+                    "provider_redirect_url": ba_url,
+                    "paypal_link": ba_url,
+                    "checkout_url": ba_url,
+                    "checkout_flow": "oaics_ba",
+                    "requires_browser": False,
+                    "requires_paypal_approval": True,
+                    "processor_entity": checkout_data.get("processor_entity") or "",
+                    "oaics_ba_status": oaics_result.get("status") or "ba_found",
+                    "oaics_confirmation_token_present": bool(
+                        oaics_result.get("confirmation_token_present")
+                    ),
+                    "oaics_confirmation_http_status": oaics_result.get("confirmation_http_status"),
+                    "oaics_confirm_http_status": oaics_result.get("confirm_http_status"),
+                    "oaics_confirm_status": oaics_result.get("confirm_status") or "",
+                    "promotion_eligibility_decided_by": "oaics_checkout_confirm",
+                })
+                self.update(
+                    job_id,
+                    percent=100,
+                    text="OAICS PayPal agreements/approve 链接生成完成",
+                    status="done",
+                    result=result,
+                )
+                return
             if options.get("openai_managed_checkout"):
                 if provider not in {"paypal", "hosted"}:
                     raise checkout_session_contract_error(
@@ -2062,7 +2689,13 @@ class JobStore:
                     "promo_update_accepted": bool(options.get("promo_update_accepted")),
                     "promotion_eligibility_decided_by": "official_checkout_page",
                 })
-                if promo_requested and options.get("promo_update_accepted"):
+                if promo_requested and options.get("promo_preapplied"):
+                    self.log(
+                        job_id,
+                        "OAICS 已按原生携带优惠重新创建 Checkout；"
+                        "最终金额和 PayPal 可用性仍需在官方结账页确认",
+                    )
+                elif promo_requested and options.get("promo_update_accepted"):
                     self.log(
                         job_id,
                         "OpenAI 已接受优惠更新；最终金额和 PayPal 可用性请在官方结账页确认",
@@ -2442,6 +3075,7 @@ class JobStore:
                     error_code=error_code,
                 )
             elif options.get("retry_wrapper"):
+                self.update(job_id, error_code=error_code)
                 self.update(job_id, status="running", percent=8, text="本次未成功，正在更换代理重试", error=error_text[:1200])
             else:
                 self.update(job_id, status="error", percent=100, text="任务失败", error=error_text[:1200])
@@ -3017,17 +3651,26 @@ def proxy_probe():
 
 
 @app.post("/api/checkout")
+@app.post("/api/checkout-detect")
 def start_checkout():
     data = request.get_json(silent=True) or {}
+    detection_only = bool(
+        request.path.rstrip("/") == "/api/checkout-detect"
+        or data.get("detection_only")
+    )
     plan = str(data.get("plan") or "plus").lower()
     link_type = str(data.get("link_type") or "hosted").lower()
     if plan not in PLANS:
         return jsonify({"error": "计划类型不正确"}), 400
     if link_type not in {"hosted", "paypal", "ideal", "upi", "pix", "gopay"}:
         return jsonify({"error": "提取方式不正确"}), 400
+    if detection_only and link_type != "paypal":
+        return jsonify({"error": "协议检测仅支持 PayPal"}), 400
     defaults = PROVIDER_DEFAULTS.get(link_type, {})
     country = str(data.get("country") or defaults.get("country") or "US").upper()
     requested_currency = str(data.get("currency") or defaults.get("currency") or COUNTRY_CURRENCY.get(country, "USD")).upper()
+    if detection_only:
+        country, requested_currency = "DE", "EUR"
     currency, _currency_source = normalize_checkout_currency(country, requested_currency)
     entry_raw = data.get("entry_proxies")
     if entry_raw is None:
@@ -3075,7 +3718,7 @@ def start_checkout():
 
     paypal_billing_profile: dict[str, str] = {}
     paypal_billing_selection: dict[str, Any] = {}
-    raw_billing_selection = data.get("billing_selection")
+    raw_billing_selection = None if detection_only else data.get("billing_selection")
     if raw_billing_selection is not None and not isinstance(raw_billing_selection, dict):
         return jsonify({"error": "PayPal 账单地址选择参数不正确"}), 400
     selection_kind = str(
@@ -3112,8 +3755,8 @@ def start_checkout():
         "checkout_currency": currency,
         "entry_proxies": entry_proxies,
         "exit_proxies": entry_proxies if link_type == "pix" else exit_proxies,
-        "use_promo": bool(data.get("use_promo", True)) if plan == "plus" else False,
-        "promo_campaign": str(data.get("promo_campaign") or "") if plan == "plus" else "",
+        "use_promo": False if detection_only else (bool(data.get("use_promo", True)) if plan == "plus" else False),
+        "promo_campaign": "" if detection_only else (str(data.get("promo_campaign") or "") if plan == "plus" else ""),
         "promo_code": str(data.get("promo_code") or "") if plan == "team" else "",
         "workspace_name": str(data.get("workspace_name") or "")[:80],
         "workspace_id": str(data.get("workspace_id") or "")[:120],
@@ -3130,6 +3773,13 @@ def start_checkout():
         "paypal_billing_profile": paypal_billing_profile,
         "paypal_billing_selection": paypal_billing_selection,
         "retry_count": retry_count,
+        "detection_only": detection_only,
+        "detection_fixed_de": detection_only and bool(data.get("detection_fixed_de", True)),
+        "checkout_protocol_hint": normalize_checkout_protocol(data.get("checkout_protocol_hint")),
+        "checkout_protocol_hint_country": str(data.get("checkout_protocol_hint_country") or "").strip().upper()[:8],
+        "checkout_protocol_hint_currency": str(data.get("checkout_protocol_hint_currency") or "").strip().upper()[:8],
+        "checkout_protocol_hint_checked_at": data.get("checkout_protocol_hint_checked_at") or 0,
+        "checkout_protocol_hint_baseline": bool(data.get("checkout_protocol_hint_baseline")),
     }
     if not options["token_raw"].strip():
         return jsonify({"error": "请填写 Access Token 或 Session JSON"}), 400
@@ -3149,6 +3799,8 @@ def start_checkout():
     return jsonify({
         "ok": True,
         "job_id": job_id,
+        "mode": "protocol_detection" if detection_only else "checkout",
+        "detection_only": detection_only,
         "queue_position": STORE.queue_position(job_id),
         "global_rpm": STORE.global_rpm,
         "ip_rpm": IP_TASK_LIMITER.limit,

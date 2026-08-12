@@ -129,6 +129,15 @@ cp .env.example .env
 | `PAY153_LEGACY_BASE` | 旧服务兼容地址，可选 |
 | `PAY153_PROXY_PRE_PROXY` | 代理池 SOCKS 前置代理，默认 `socks5://127.0.0.1:9697`；留空可关闭 |
 | `PAYPAL_APPROVE_POLL_ATTEMPTS` | PayPal 审批后等待跳转地址的轮询次数，默认 6，范围 1-12 |
+| `PAY153_OAICS_PUBLISHABLE_KEY` | OAICS 未返回 publishable key 时的可选 Stripe 公钥 |
+| `PAY153_OAICS_CONFIRM_AUTH` | OAICS 接口是否附带当前账号 Bearer，默认 `1`；设为 `0` 仅用于复现旧 HAR |
+| `PAY153_OAI_CLIENT_VERSION` / `PAY153_OAI_CLIENT_BUILD_NUMBER` | ChatGPT Checkout 上下文版本头，可按当前页面更新 |
+| `PAY153_OAI_WEB_DEPLOYMENT_ATTESTATION` | 可选的当前页面部署证明；过期值不要复用 |
+| `PAY153_OAI_TELEMETRY` / `PAY153_OAI_CLIENT_OBSERVATION` | 可选运行时诊断头；留空时不发送 |
+| `PAY153_OAICS_USER_AGENT` | OAICS 请求专用 User-Agent；为空时复用项目浏览器指纹 |
+| `PAY153_OAICS_HCAPTCHA_TOKEN` | 可选的当前有效 hCaptcha token；动态一次性值，不能复用旧 HAR |
+| `PAY153_STRIPE_JS_VERSION` | OAICS confirmation token 的 Stripe.js 版本，默认 `4dae3e22af` |
+| `PAY153_OAICS_TIME_ON_PAGE` | OAICS confirmation token 的页面停留时间字段，默认 `42000` |
 | `PAY153_MANAGE_PASSWORD` | 管理中心密码；为空时 `/manage` 的管理 API 保持关闭 |
 | `PAY153_SESSION_SECRET` | Flask 登录会话密钥，生产环境建议固定设置 |
 | `PAY153_MANAGE_ENCRYPTION_KEY` | 管理数据库的 Fernet 密钥；为空时自动生成本地密钥文件 |
@@ -151,6 +160,8 @@ socks5://username:password@host:port
 当前国家/地区的 ASN 推荐顺序会保存到浏览器本地键 `pay153.proxy_asn_recommendations.v1`，用于选择参考；它不会自动修改或重排代理池里的实际 IP。
 
 代理池采用两跳链路：本地 SOCKS5 `PAY153_PROXY_PRE_PROXY` 是第一跳，代理池中的每条代理是最终出口。程序通过 curl 的 `PRE_PROXY` 建立到代理池节点的连接，因此不会把本地 9697 误当成地区出口。9697 必须支持 SOCKS5 并允许连接到代理池节点；如果本地代理服务不可用，所有代理池检测都会失败。设置 `PAY153_PROXY_PRE_PROXY=` 可恢复代理池直连。
+
+OAICS PayPal 使用本地 HTTP 接口链路，不依赖浏览器：读取 OAICS 状态、提交 `checkout/taxes`，初始化 Stripe Elements Session，向 Stripe `v1/confirmation_tokens` 创建 `ctoken_*`，再向 OpenAI `payments/checkout/confirm` 提交；若 confirm 返回 `pi_*`/`seti_*` client secret，会继续确认对应 Intent 并解析 PayPal 跳转。所有步骤复用当前支付会话和代理链，因此仍经过 9697。优惠任务会先核验应付金额为 0；`blocked`、401、缺少 BA 或动态验证码失败会进入 OAICS 专用重试，耗尽后回退官方 OAICS 结账页。hCaptcha、部署证明等动态字段不会伪造或复用旧 HAR token。
 
 ## 管理中心
 

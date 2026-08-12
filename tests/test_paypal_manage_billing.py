@@ -125,6 +125,32 @@ class PaypalManageBillingTests(unittest.TestCase):
         self.assertEqual(denied.status_code, 401)
         self.assertIn("登录管理中心", denied.get_json()["error"])
 
+    def test_protocol_detection_is_a_separate_fixed_de_job_without_promo(self):
+        captured = {}
+
+        def capture(options):
+            captured.clear()
+            captured.update(options)
+            return "job-paypal-detect"
+
+        with (
+            patch.object(app_module.STORE, "create", side_effect=capture),
+            patch.object(app_module.STORE, "queue_position", return_value=0),
+            patch.object(app_module.IP_TASK_LIMITER, "acquire", return_value=(True, 0)),
+        ):
+            response = self.client.post(
+                "/api/checkout-detect",
+                json=self.checkout_payload(None),
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["mode"], "protocol_detection")
+        self.assertTrue(captured["detection_only"])
+        self.assertTrue(captured["detection_fixed_de"])
+        self.assertFalse(captured["use_promo"])
+        self.assertEqual(captured["checkout_country"], "DE")
+        self.assertEqual(captured["checkout_currency"], "EUR")
+
     def test_checkout_resolves_exact_builtin_address_by_stable_id(self):
         self.login()
         listing = self.client.get("/api/manage/paypal-billing-options?country=GB").get_json()

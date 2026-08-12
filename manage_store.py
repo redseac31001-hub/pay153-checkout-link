@@ -88,6 +88,30 @@ CREATE INDEX IF NOT EXISTS idx_proxy_pools_country ON proxy_pools(country, rail,
 CREATE INDEX IF NOT EXISTS idx_billing_profiles_country ON billing_profiles(country, rail);
 CREATE INDEX IF NOT EXISTS idx_success_records_recorded_at ON success_records(recorded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_success_records_country ON success_records(country, link_type);
+
+CREATE TABLE IF NOT EXISTS oaics_fallbacks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL UNIQUE,
+    recorded_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    link_type TEXT NOT NULL DEFAULT '',
+    plan TEXT NOT NULL DEFAULT '',
+    country TEXT NOT NULL DEFAULT '',
+    currency TEXT NOT NULL DEFAULT '',
+    account_ref_hash TEXT NOT NULL DEFAULT '',
+    account_email_secret TEXT NOT NULL DEFAULT '',
+    account_id_secret TEXT NOT NULL DEFAULT '',
+    session_id_secret TEXT NOT NULL DEFAULT '',
+    processor_entity TEXT NOT NULL DEFAULT '',
+    payment_methods_json TEXT NOT NULL DEFAULT '[]',
+    checkout_url_secret TEXT NOT NULL DEFAULT '',
+    attempt INTEGER,
+    max_attempts INTEGER,
+    resolved_session_id_secret TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_oaics_fallbacks_recorded_at ON oaics_fallbacks(recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_oaics_fallbacks_status ON oaics_fallbacks(status);
 """
 
 
@@ -526,6 +550,120 @@ class ManageStore:
             connection.commit()
             row = connection.execute("SELECT * FROM success_records WHERE job_id=?", (job_id,)).fetchone()
         return self._success_row(row)
+
+    def record_oaics_fallback(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Persist the latest browser-backed OAICS link without treating it as success."""
+        job_id = text(result.get("job_id"), 100) or f"oaics-{uuid.uuid4().hex}"
+        email = text(result.get("account_email"), 240)
+        account_id = text(result.get("account_id"), 240)
+        status = text(result.get("status"), 40) or "pending"
+        if status not in {"pending", "superseded", "used_as_fallback", "expired"}:
+            status = "pending"
+        methods = result.get("payment_methods")
+        if not isinstance(methods, list):
+            methods = []
+        methods = [text(method, 40).lower() for method in methods if text(method, 40)]
+        values = (
+            job_id, text(result.get("recorded_at"), 40) or now_text(), status,
+            text(result.get("link_type"), 40), text(result.get("plan"), 40),
+            normalize_country(result.get("country")), text(result.get("currency"), 20),
+            account_hash(email, account_id), self._seal(email), self._seal(account_id),
+            self._seal(text(result.get("session_id"), 240)),
+            text(result.get("processor_entity"), 80),
+            json.dumps(methods, ensure_ascii=False, separators=(",", ":")),
+            self._seal(text(result.get("url"), 1200)), result.get("attempt"),
+            result.get("max_attempts"), self._seal(text(result.get("resolved_session_id"), 240)),
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO oaics_fallbacks
+                   (job_id, recorded_at, status, link_type, plan, country, currency,
+                    account_ref_hash, account_email_secret, account_id_secret,
+                    session_id_secret, processor_entity, payment_methods_json,
+                    checkout_url_secret, attempt, max_attempts, resolved_session_id_secret)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(job_id) DO UPDATE SET recorded_at=excluded.recorded_at,
+                   status=excluded.status, link_type=excluded.link_type,
+                   plan=excluded.plan, country=excluded.country, currency=excluded.currency,
+                   account_ref_hash=excluded.account_ref_hash,
+                   account_email_secret=excluded.account_email_secret,
+                   account_id_secret=excluded.account_id_secret,
+                   session_id_secret=excluded.session_id_secret,
+                   processor_entity=excluded.processor_entity,
+                   payment_methods_json=excluded.payment_methods_json,
+                   checkout_url_secret=excluded.checkout_url_secret,
+                   attempt=excluded.attempt, max_attempts=excluded.max_attempts,
+                   resolved_session_id_secret=excluded.resolved_session_id_secret""",
+                values,
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM oaics_fallbacks WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return self._oaics_row(row)
+
+    def finalize_oaics_fallback(
+        self,
+        job_id: str,
+        status: str,
+        resolved_session_id: str = "",
+    ) -> dict[str, Any]:
+        """Mark a saved OAICS link as superseded or the final browser fallback."""
+        status = text(status, 40)
+        if status not in {"superseded", "used_as_fallback", "expired"}:
+            status = "expired"
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """UPDATE oaics_fallbacks
+                   SET status=?, recorded_at=?, resolved_session_id_secret=?
+                   WHERE job_id=?""",
+                (status, now_text(), self._seal(text(resolved_session_id, 240)), text(job_id, 100)),
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM oaics_fallbacks WHERE job_id=?", (text(job_id, 100),)
+            ).fetchone()
+        return self._oaics_row(row)
+
+    def _oaics_row(self, row: sqlite3.Row | None, reveal: bool = False) -> dict[str, Any]:
+        if not row:
+            return {}
+        email = self._open(row["account_email_secret"], "") or ""
+        account_id = self._open(row["account_id_secret"], "") or ""
+        session_id = self._open(row["session_id_secret"], "") or ""
+        url = self._open(row["checkout_url_secret"], "") or ""
+        resolved_session_id = self._open(row["resolved_session_id_secret"], "") or ""
+        try:
+            methods = json.loads(row["payment_methods_json"] or "[]")
+        except json.JSONDecodeError:
+            methods = []
+        result = {
+            "id": row["id"], "job_id": row["job_id"], "recorded_at": row["recorded_at"],
+            "status": row["status"], "link_type": row["link_type"], "plan": row["plan"],
+            "country": row["country"], "currency": row["currency"],
+            "account": mask_email(email), "account_id": mask_account_id(account_id),
+            "session_id": mask_display(session_id), "processor_entity": row["processor_entity"],
+            "payment_methods": methods, "attempt": row["attempt"],
+            "max_attempts": row["max_attempts"],
+            "resolved_session_id": mask_display(resolved_session_id),
+        }
+        if reveal:
+            result.update({
+                "account_email": email, "account_id_raw": account_id,
+                "session_id": session_id, "url": url,
+                "resolved_session_id": resolved_session_id,
+            })
+        return result
+
+    def get_oaics_fallback_by_job(self, job_id: str, reveal: bool = False) -> dict[str, Any]:
+        job_id = text(job_id, 100)
+        if not job_id:
+            return {}
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM oaics_fallbacks WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return self._oaics_row(row, reveal=reveal)
 
     def _success_row(self, row: sqlite3.Row | None, reveal: bool = False) -> dict[str, Any]:
         if not row:
