@@ -2,6 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
+import app as app_module
 import stripe_checkout as sc
 
 
@@ -25,6 +26,29 @@ class FakeHttp:
 
 
 class PaypalFlowTests(unittest.TestCase):
+    def test_paypal_promo_is_never_attached_to_initial_checkout(self):
+        options = {
+            "plan": "plus",
+            "link_type": "PayPal",
+            "country": "DE",
+            "currency": "EUR",
+            "checkout_country": "DE",
+            "checkout_currency": "EUR",
+            "use_promo": True,
+            # Simulate a stale/incorrect caller trying to re-enable native promo.
+            "promo_on_create": True,
+        }
+
+        payload = app_module.checkout_payload(options, {"email": "customer@example.com"})
+
+        self.assertNotIn("promo_campaign", payload)
+
+        card_payload = app_module.checkout_payload(
+            {**options, "link_type": "card"},
+            {"email": "customer@example.com"},
+        )
+        self.assertIn("promo_campaign", card_payload)
+
     def test_promo_not_applied_is_a_non_retryable_error(self):
         error = sc.PromoNotAppliedError("Plus 首月免费优惠未生效：Stripe 今日应付 amount=2000")
         self.assertEqual(error.error_code, sc.PROMO_NOT_APPLIED_ERROR_CODE)

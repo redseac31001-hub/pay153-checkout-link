@@ -766,6 +766,7 @@ async def sentinel_headers(proxy: str, flow: str, device_id: str, cookie: str) -
 
 def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
     plan = options["plan"]
+    link_type = str(options.get("link_type") or "").strip().lower()
     country = options.get("checkout_country") or options["country"]
     requested_currency = options.get("checkout_currency") or options["currency"]
     currency, _currency_source = normalize_checkout_currency(country, requested_currency)
@@ -803,8 +804,11 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
             "auto_top_up_enabled": True,
         }
     elif plan == "plus" and options.get("use_promo") and (
-        options.get("link_type") not in {"pix", "paypal", "upi", "ideal", "gopay"}
-        or options.get("promo_on_create")
+        link_type not in {"pix", "paypal", "upi", "ideal", "gopay"}
+        or (
+            options.get("promo_on_create")
+            and link_type != "paypal"
+        )
     ):
         common["promo_campaign"] = {
             "promo_campaign_id": promo or "plus-1-month-free",
@@ -1471,9 +1475,8 @@ class JobStore:
                 # remove PayPal from Stripe's available payment methods. Keep
                 # PayPal in the initial Checkout, then apply the campaign via
                 # checkout/update and verify that Stripe reaches amount=0.
-                # 优化策略：优先使用分离优惠（promo_on_create=False）避免零金额移除 PayPal
-                # 仅在第 4、7、10... 轮尝试原生优惠以平衡风控特征
-                current["promo_on_create"] = (attempt % 3 == 1) if attempt > 3 else False
+                # 所有重试都使用后置优惠；不能在后续轮次重新创建零金额 Checkout。
+                current["promo_on_create"] = False
             if current.get("link_type") in {"pix", "upi"}:
                 # Alternate both Stripe submission shapes across outer retries.
                 # Some Checkout revisions accept a pre-created pm_* while
