@@ -43,6 +43,7 @@ const manageJs = fs.readFileSync('static/manage.js', 'utf8');
     {
       id: 'acct-1', raw: 'eyJsecret-token-one', token: 'eyJsecret-token-one',
       label: 'alice@example.com', email: 'alice@example.com', accountId: 'acct-alice-123456',
+      exp: 4102444800,
       source: 'batch.at', promoStatus: 'supported',
       paymentMethods: {paypal: 'supported', gopay: 'rejected'}, riskStatus: 'clear',
       lastStatus: 'done', lastLinkType: 'paypal', lastResultUrl: 'https://example.test/result', lastCheckedAt: Date.now()
@@ -50,6 +51,7 @@ const manageJs = fs.readFileSync('static/manage.js', 'utf8');
     {
       id: 'acct-2', raw: 'eyJsecret-token-two', token: 'eyJsecret-token-two',
       label: 'blocked@example.com', email: 'blocked@example.com', accountId: 'acct-blocked-123456',
+      exp: 1,
       source: 'manual', promoStatus: 'unsupported',
       paymentMethods: {paypal: 'rejected'}, riskStatus: 'blocked',
       riskReason: '账号 blocked', lastStatus: 'error', lastLinkType: 'paypal', lastCheckedAt: Date.now()
@@ -73,6 +75,9 @@ const manageJs = fs.readFileSync('static/manage.js', 'utf8');
   const content = table.textContent;
   if (!content.includes('支持') || !content.includes('疑似封禁') || !content.includes('冻结（连续 block）') || !content.includes('PayPal')) {
     throw new Error(`account statuses not rendered: ${content}`);
+  }
+  if (!content.includes('有效期未知') && !content.includes('已过期') && !content.includes('至 2100')) {
+    throw new Error(`account expiry is not rendered: ${content}`);
   }
   if (table.querySelectorAll('a.account-result-link').length !== 1) throw new Error('last result link not rendered');
   if (content.includes('secret-token-one') || content.includes('secret-token-two')) {

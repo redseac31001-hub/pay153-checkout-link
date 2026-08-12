@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 管理中心</title>
   <meta name="description" content="PAY.153 本地代理池、账单档案、ASN 推荐与成功节点管理中心">
-  <link rel="stylesheet" href="/static/styles.css?v=20260812-risk-freeze01">
-  <link rel="stylesheet" href="/static/manage.css?v=20260810-manage01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260812-account-ui01">
+  <link rel="stylesheet" href="/static/manage.css?v=20260812-account-ui01">
 </head>
 <body class="manage-page">
   <div class="paper-noise"></div>
@@ -92,8 +92,8 @@
           </section>
 
           <section class="manage-section" data-panel="accounts" hidden>
-            <div class="section-heading"><div><div class="eyebrow"><span>02</span> ACCOUNT STATUS</div><h2>账号状态列表。</h2><p>读取当前浏览器本机账号元数据，汇总优惠资格、支付方式和拒绝/冷却信号。</p></div><span class="section-status">LOCAL ONLY</span></div>
-            <div class="account-management-note panel"><strong>隐私边界</strong><span>本列表只读同源 localStorage 的脱敏状态；Access Token 不上传管理接口，也不在表格中展示。支付方式未被接口明确返回时显示“未检测”；连续三次明确 block 会进入本机冻结。</span><a class="text-button" href="/">回工作台导入账号 →</a></div>
+            <div class="section-heading"><div><div class="eyebrow"><span>02</span> ACCOUNT STATUS</div><h2>账号状态列表。</h2><p>读取当前浏览器本机账号元数据，汇总有效期、优惠资格、支付方式和拒绝/冷却信号。</p></div><span class="section-status">LOCAL ONLY</span></div>
+            <div class="account-management-note panel"><strong>隐私边界</strong><span>本列表只读同源 localStorage 的脱敏状态；Access Token 不上传管理接口，也不在表格中展示。这里查看 Token 有效期和最近地区；支付方式未被接口明确返回时显示“未检测”；连续三次明确 block 会进入本机冻结。</span><a class="text-button" href="/">回工作台导入账号 →</a></div>
             <div class="filter-bar panel">
               <label class="filter-wide"><span>搜索</span><input id="accountQuery" placeholder="邮箱、账号 ID、来源或任务"></label>
               <label><span>优惠</span><select id="accountPromoFilter"><option value="">全部</option><option value="supported">支持</option><option value="unsupported">不支持 / 未生效</option><option value="unknown">未检测</option></select></label>
@@ -102,7 +102,7 @@
               <button id="refreshAccounts" class="secondary-button" type="button">刷新</button>
             </div>
             <div class="section-heading compact"><div><h3>当前浏览器账号</h3><p>状态来自最近一次任务结果；“疑似封禁”仅表示响应出现明确账号封禁信号，不代表永久结论。</p></div><span id="accountListMeta" class="section-status">0 个账号</span></div>
-            <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>账号</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 结果</th><th>来源 / 任务</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
+            <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>账号</th><th>有效期</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 地区</th><th>来源 / 任务</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
           </section>
 
           <section class="manage-section" data-panel="proxies" hidden>
@@ -191,6 +191,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>管理中心只建议在受控的本地网络中开放。</p></footer>
-  <script src="/static/manage.js?v=20260812-risk-freeze01"></script>
+  <script src="/static/manage.js?v=20260812-account-ui01"></script>
 </body>
 </html>

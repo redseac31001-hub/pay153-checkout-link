@@ -1016,6 +1016,9 @@ function parseAccountRaw(raw, sourceLabel=''){
     lastStatus: '',
     lastJobId: '',
     lastLinkType: '',
+    lastCountry: '',
+    lastCurrency: '',
+    lastPaymentCountry: '',
     lastResultUrl: '',
     lastCheckedAt: 0,
     updatedAt: Date.now()
@@ -1077,6 +1080,9 @@ function restoreAccountStatus(target, source){
   target.lastStatus = String(source?.lastStatus || target.lastStatus || '').slice(0, 40);
   target.lastJobId = String(source?.lastJobId || target.lastJobId || '').slice(0, 120);
   target.lastLinkType = normalizeAccountPaymentMethod(source?.lastLinkType || target.lastLinkType);
+  target.lastCountry = String(source?.lastCountry || target.lastCountry || '').trim().toUpperCase().slice(0, 8);
+  target.lastCurrency = String(source?.lastCurrency || target.lastCurrency || '').trim().toUpperCase().slice(0, 8);
+  target.lastPaymentCountry = String(source?.lastPaymentCountry || target.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8);
   target.lastResultUrl = String(source?.lastResultUrl || target.lastResultUrl || '').slice(0, 2000);
   target.lastCheckedAt = Number(source?.lastCheckedAt || target.lastCheckedAt || 0);
   return target;
@@ -1138,6 +1144,9 @@ function persistAccounts(){
       lastStatus: String(entry.lastStatus || '').slice(0, 40),
       lastJobId: String(entry.lastJobId || '').slice(0, 120),
       lastLinkType: normalizeAccountPaymentMethod(entry.lastLinkType),
+      lastCountry: String(entry.lastCountry || '').trim().toUpperCase().slice(0, 8),
+      lastCurrency: String(entry.lastCurrency || '').trim().toUpperCase().slice(0, 8),
+      lastPaymentCountry: String(entry.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8),
       lastResultUrl: String(entry.lastResultUrl || '').slice(0, 2000),
       lastCheckedAt: Number(entry.lastCheckedAt || 0),
       updatedAt: Number(entry.updatedAt || Date.now())
@@ -1221,6 +1230,50 @@ function formatAccountExpiry(entry){
   catch{ return '有效期未知'; }
 }
 
+function accountHasMarker(entry, now=Date.now()){
+  return Boolean(
+    entry?.expired
+    || isAccountInCooldown(entry, now)
+    || isAccountFrozen(entry)
+    || ['rejected', 'blocked', 'frozen'].includes(String(entry?.riskStatus || ''))
+    || entry?.promoStatus === 'unsupported'
+  );
+}
+
+function accountMarkerView(entry, now=Date.now()){
+  if (isAccountFrozen(entry)) return ['冻结', 'danger'];
+  if (isAccountInCooldown(entry, now)) return ['冷却', 'warn'];
+  if (String(entry?.riskStatus || '') === 'blocked') return ['疑似封禁', 'danger'];
+  if (entry?.expired) return ['已过期', 'danger'];
+  if (String(entry?.riskStatus || '') === 'rejected') return ['最近被拒', 'warn'];
+  if (entry?.promoStatus === 'unsupported') return ['优惠未生效', 'warn'];
+  if (entry?.promoStatus === 'supported' || String(entry?.riskStatus || '') === 'clear') return ['可选', 'good'];
+  return ['待检测', 'neutral'];
+}
+
+function accountMethodLabel(method){
+  return railDisplayNames[method] || ({card: 'Card', link: 'Link'}[method] || String(method || '').toUpperCase());
+}
+
+function accountChipBadge(label, tone='neutral'){
+  const badge = document.createElement('span');
+  badge.className = `account-chip-badge ${tone}`;
+  badge.textContent = label;
+  return badge;
+}
+
+function selectionAccountEntries(now=Date.now()){
+  return accountEntries
+    .map((entry, index) => ({entry, index}))
+    .sort((left, right) => {
+      const markedOrder = Number(accountHasMarker(left.entry, now)) - Number(accountHasMarker(right.entry, now));
+      if (markedOrder) return markedOrder;
+      const activeOrder = Number(right.entry.id === activeAccountId) - Number(left.entry.id === activeAccountId);
+      return activeOrder || left.index - right.index;
+    })
+    .map(item => item.entry);
+}
+
 function scheduleAccountCooldownTick(){
   if (accountCooldownTimer) {
     clearInterval(accountCooldownTimer);
@@ -1257,22 +1310,25 @@ function renderAccountList(){
   list.innerHTML = '';
   if (!accountEntries.length) {
     list.hidden = true;
+    if ($('accountListHint')) $('accountListHint').hidden = true;
     if ($('tokenHint')) $('tokenHint').textContent = '自动识别账号信息 · 本机保存';
     updateBatchControls();
     return;
   }
   list.hidden = false;
   const now = Date.now();
-  accountEntries.forEach(entry => {
+  selectionAccountEntries(now).forEach(entry => {
     const cooling = isAccountInCooldown(entry, now);
     const frozen = isAccountFrozen(entry);
+    const marked = accountHasMarker(entry, now);
     const available = accountCanBatch(entry, now);
     const row = document.createElement('div');
     row.className = 'account-chip'
       + (entry.id === activeAccountId ? ' is-active' : '')
       + (entry.expired ? ' is-expired' : '')
       + (cooling ? ' is-cooldown' : '')
-      + (frozen ? ' is-frozen' : '');
+      + (frozen ? ' is-frozen' : '')
+      + (marked ? ' is-marked' : '');
     row.dataset.accountId = entry.id;
 
     const selectWrap = document.createElement('label');
@@ -1295,25 +1351,32 @@ function renderAccountList(){
     const main = document.createElement('button');
     main.type = 'button';
     main.className = 'account-chip-main';
-    main.style.cssText = 'border:0;background:transparent;padding:0;cursor:pointer;text-align:left;min-width:0';
+    main.title = '点击选用此账号';
+    main.setAttribute('aria-pressed', String(entry.id === activeAccountId));
     const title = document.createElement('span');
     title.className = 'account-chip-title';
-    title.textContent = entry.label + (frozen ? ' · 冻结中' : (cooling ? ' · 冷却中' : ''));
+    title.textContent = entry.label;
+    const summary = document.createElement('span');
+    summary.className = 'account-chip-summary';
+    const marker = accountMarkerView(entry, now);
+    summary.append(accountChipBadge(marker[0], marker[1]));
+    if (entry.promoStatus === 'supported') summary.append(accountChipBadge('优惠支持', 'good'));
+    if (entry.promoStatus === 'unsupported' && marker[0] !== '优惠未生效') summary.append(accountChipBadge('优惠未生效', 'warn'));
+    const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
+      .filter(method => entry.paymentMethods[method] === 'supported');
+    if (supportedMethods.length) {
+      summary.append(accountChipBadge(`方式 ${supportedMethods.slice(0, 3).map(accountMethodLabel).join(' / ')}`, 'neutral'));
+    }
+    const lastRegion = [entry.lastCountry, entry.lastCurrency].filter(Boolean).join('/');
+    if (lastRegion) summary.append(accountChipBadge(`地区 ${lastRegion}`, 'neutral'));
     const meta = document.createElement('span');
-    meta.className = 'account-chip-meta' + ((entry.expired || cooling || frozen) ? ' is-expired' : '');
-    const bits = [entry.source, formatAccountExpiry(entry)];
+    meta.className = 'account-chip-meta' + (marked ? ' is-marked' : '');
+    const bits = [entry.source];
     if (entry.accountId) bits.push(`id ${entry.accountId.slice(0, 8)}`);
     if (frozen) bits.push(`连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(entry.consecutiveBlocks || 0))} 次 block · 需手动解冻`);
     else if (cooling) bits.push(`冷却剩余 ${formatCooldownRemaining(entry, now)} · 至 ${formatCooldownUntil(entry)}`);
-    if (entry.promoStatus === 'supported') bits.push('优惠支持');
-    if (entry.promoStatus === 'unsupported') bits.push('优惠未生效');
-    const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
-      .filter(method => entry.paymentMethods[method] === 'supported');
-    if (supportedMethods.length) bits.push(`方式 ${supportedMethods.slice(0, 4).join('/')}`);
-    if (!cooling && entry.riskStatus === 'rejected') bits.push('最近被拒');
-    if (!cooling && !frozen && entry.riskStatus === 'blocked') bits.push('疑似封禁');
     meta.textContent = bits.filter(Boolean).join(' · ');
-    main.append(title, meta);
+    main.append(title, summary, meta);
     main.addEventListener('click', () => selectAccount(entry.id));
 
     const actions = document.createElement('div');
@@ -1361,6 +1424,13 @@ function renderAccountList(){
     });
     list.appendChild(row);
   });
+  if ($('accountListHint')) {
+    const markedCount = accountEntries.filter(entry => accountHasMarker(entry, now)).length;
+    $('accountListHint').hidden = false;
+    $('accountListHint').textContent = markedCount
+      ? `${accountEntries.length - markedCount} 个账号优先显示 · ${markedCount} 个已标记账号已排到后方`
+      : `${accountEntries.length} 个账号 · 点击账号行即可选用`;
+  }
   if ($('tokenHint')) {
     const active = accountEntries.find(item => item.id === activeAccountId);
     if (active && isAccountInCooldown(active)) {
@@ -1591,6 +1661,9 @@ function recordAccountOutcome(target, data, requestedMethod='', jobId=''){
   target.lastStatus = outcomeStatus.slice(0, 40);
   target.lastError = String(data?.error || '').slice(0, 240);
   target.lastLinkType = resultLinkType || target.lastLinkType;
+  target.lastCountry = String(result.checkout_country || result.country || target.lastCountry || '').trim().toUpperCase().slice(0, 8);
+  target.lastCurrency = String(result.checkout_currency || result.currency || target.lastCurrency || '').trim().toUpperCase().slice(0, 8);
+  target.lastPaymentCountry = String(result.payment_proxy_country || result.payment_country || target.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8);
   if (outcomeStatus === 'done') {
     const resultLink = resultUrl(result);
     if (resultLink) target.lastResultUrl = resultLink;

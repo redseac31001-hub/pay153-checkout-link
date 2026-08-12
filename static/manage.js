@@ -64,6 +64,13 @@ function formatTime(value) {
   return output.length > 16 ? output.slice(0, 16) : text(output);
 }
 
+function accountExpiryView(exp) {
+  const timestamp = Number(exp || 0) * 1000;
+  if (!timestamp) return ['有效期未知', 'neutral'];
+  if (timestamp <= Date.now()) return ['已过期', 'danger'];
+  return [`至 ${formatTime(new Date(timestamp).toISOString())}`, 'good'];
+}
+
 const ACCOUNT_METHOD_LABELS = {
   card: 'Card',
   gopay: 'Gopay',
@@ -153,6 +160,7 @@ function localAccountList() {
     label: String(item.label || item.email || item.accountId || '').trim(),
     email: String(item.email || '').trim(),
     accountId: String(item.accountId || '').trim(),
+    exp: Number(item.exp || 0),
     kind: String(item.kind || 'token'),
     source: String(item.source || '本机'),
     promoStatus: ['supported', 'unsupported', 'unknown'].includes(item.promoStatus) ? item.promoStatus : 'unknown',
@@ -163,6 +171,9 @@ function localAccountList() {
     cooldownUntil: Number(item.cooldownUntil || 0),
     lastStatus: String(item.lastStatus || '').slice(0, 40),
     lastLinkType: String(item.lastLinkType || '').slice(0, 40),
+    lastCountry: String(item.lastCountry || '').trim().toUpperCase().slice(0, 8),
+    lastCurrency: String(item.lastCurrency || '').trim().toUpperCase().slice(0, 8),
+    lastPaymentCountry: String(item.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8),
     lastResultUrl: String(item.lastResultUrl || '').slice(0, 2000),
     lastCheckedAt: Number(item.lastCheckedAt || 0),
     lastJobId: String(item.lastJobId || '').slice(0, 120)
@@ -197,6 +208,13 @@ function renderAccounts(items) {
     identityMeta.className = 'subtle';
     identityMeta.textContent = item.accountId ? `ID ${maskLocalAccount(item.accountId)}` : text(item.kind, 'Token');
     identity.append(title, identityMeta);
+
+    const expiry = accountExpiryView(item.exp);
+    const expiryCell = document.createElement('td');
+    expiryCell.append(makeStatusPill(expiry[0], expiry[1]));
+    if (item.exp) {
+      expiryCell.title = expiry[0];
+    }
 
     const promo = accountPromoView(item.promoStatus);
     const promoCell = document.createElement('td');
@@ -244,7 +262,10 @@ function renderAccounts(items) {
     lastCell.textContent = formatTime(checked);
     const lastMeta = document.createElement('div');
     lastMeta.className = 'subtle';
-    lastMeta.textContent = [item.lastStatus, item.lastLinkType].filter(Boolean).join(' · ') || '尚未执行任务';
+    const region = [item.lastCountry, item.lastCurrency].filter(Boolean).join('/');
+    const paymentRegion = item.lastPaymentCountry && item.lastPaymentCountry !== item.lastCountry
+      ? `支付 ${item.lastPaymentCountry}` : '';
+    lastMeta.textContent = [item.lastStatus, item.lastLinkType, region, paymentRegion].filter(Boolean).join(' · ') || '尚未执行任务';
     lastCell.append(lastMeta);
     const resultLink = safeLocalResultUrl(item.lastResultUrl);
     if (resultLink) {
@@ -264,7 +285,7 @@ function renderAccounts(items) {
     sourceMeta.textContent = item.lastJobId ? `Job ${item.lastJobId}` : 'Token 仅保存在本机';
     sourceCell.append(sourceMeta);
 
-    row.append(identity, promoCell, methodsCell, riskCell, lastCell, sourceCell);
+    row.append(identity, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell);
     table.append(row);
   });
   setTableState('accountTable', 'accountEmpty', items.length, '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');

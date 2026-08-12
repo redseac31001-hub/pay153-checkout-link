@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 多通道提链控制台</title>
   <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Gopay、Team 与 Codex 空间提链工作台">
-  <link rel="stylesheet" href="/static/styles.css?v=20260812-risk-freeze01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260812-account-ui01">
 </head>
 <body>
   <div class="paper-noise"></div>
@@ -60,6 +60,7 @@
               <span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span>
             </div>
             <div id="accountList" class="account-list" hidden></div>
+            <div id="accountListHint" class="account-list-hint" hidden></div>
             <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="可直接粘贴一个 AT 提交；或粘贴多个 AT 后点“导入粘贴内容”"></textarea>
             <span class="field-note">支持直接粘贴单个 Access Token / Session JSON；点击“导入粘贴内容”可把一行一个 AT 的多账号文本写入本机账号列表。账号列表保存在本机浏览器 localStorage，不上传业务服务器；连续 3 次 PayPal 风控拒绝将为该账号本机冷却约 60 分钟，连续 3 次明确账号 block 将进入本机冻结。</span>
           </div>
@@ -277,6 +278,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260812-risk-freeze01"></script>
+  <script src="/static/app.js?v=20260812-account-ui01"></script>
 </body>
 </html>

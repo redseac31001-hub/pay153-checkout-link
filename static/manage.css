@@ -31,7 +31,7 @@ button:disabled{cursor:not-allowed!important;opacity:.52;transform:none!importan
 .account-management-note strong{flex:none;color:var(--brand-2);font:800 10px var(--display);letter-spacing:.1em}
 .account-management-note span{flex:1}
 .account-management-note .text-button{flex:none}
-.account-status-table{min-width:980px!important}
+.account-status-table{min-width:1120px!important}
 .account-manage-title{display:block;color:var(--ink);font-size:12px}
 .account-method-list{display:flex;flex-wrap:wrap;gap:5px;max-width:250px}
 .account-status-note{max-width:220px;margin-top:6px;color:var(--faint);font-size:9px;line-height:1.45;white-space:normal}

@@ -144,6 +144,7 @@ select{cursor:pointer}
   display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto;
   margin:0 0 10px;padding:10px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2)
 }
+.account-list-hint{margin:-3px 0 10px;color:var(--faint);font-size:10px;line-height:1.45}
 .account-chip{
   display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px 12px;align-items:center;
   width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);
@@ -151,6 +152,7 @@ select{cursor:pointer}
 }
 .account-chip:hover{border-color:rgba(109,74,255,.45);transform:translateY(-1px)}
 .account-chip.is-active{border-color:var(--brand);box-shadow:0 0 0 3px rgba(109,74,255,.12);background:rgba(109,74,255,.05)}
+.account-chip.is-marked:not(.is-active){background:rgba(245,158,66,.035)}
 .account-chip.is-cooldown{border-color:rgba(245,158,66,.55);background:rgba(245,158,66,.08)}
 .account-chip.is-cooldown .account-chip-title{color:var(--warning)}
 .account-chip.is-frozen{border-color:rgba(214,73,92,.55);background:rgba(214,73,92,.08)}
@@ -158,10 +160,17 @@ select{cursor:pointer}
 .account-batch-select{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:var(--surface-3);cursor:pointer}
 .account-batch-select input{width:15px;height:15px;margin:0;accent-color:var(--brand);cursor:pointer}
 .account-batch-select input:disabled{cursor:not-allowed}
-.account-chip-main{min-width:0;display:flex;flex-direction:column;gap:3px}
+.account-chip-main{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:4px;border:0;padding:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.account-chip-main:focus-visible{outline:2px solid var(--brand);outline-offset:3px;border-radius:6px}
 .account-chip-title{color:var(--ink);font-size:12px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.account-chip-meta{color:var(--muted);font-size:11px;line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-chip-summary{display:flex;flex-wrap:wrap;gap:4px;max-width:100%}
+.account-chip-badge{display:inline-flex;align-items:center;max-width:100%;padding:3px 6px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:9px;font-weight:800;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.account-chip-badge.good{border-color:rgba(28,168,121,.22);color:var(--success);background:rgba(28,168,121,.08)}
+.account-chip-badge.warn{border-color:rgba(245,158,66,.28);color:#c77420;background:rgba(245,158,66,.10)}
+.account-chip-badge.danger{border-color:rgba(214,73,92,.25);color:var(--danger);background:rgba(214,73,92,.09)}
+.account-chip-meta{color:var(--muted);font-size:10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .account-chip-meta.is-expired,.account-chip.is-expired .account-chip-title{color:var(--danger)}
+.account-chip-meta.is-marked{color:var(--warning)}
 .account-chip-remove{padding:6px 10px;flex-shrink:0}
 .account-chip-remove:hover{border-color:var(--danger);color:var(--danger)}
 .field-note,.inline-note{display:block;margin-top:7px;color:var(--muted);font-size:11px;line-height:1.6}
@@ -314,9 +323,10 @@ textarea::-webkit-scrollbar-corner,.log-box::-webkit-scrollbar-corner{background
 .dark textarea:focus,.dark input:focus,.dark select:focus{background:#111b2b}
 .dark textarea::placeholder,.dark input::placeholder{color:#58667e}
 .dark .token-field textarea{background:linear-gradient(145deg,#0c1421,#101a29)}
-.dark .account-list{background:#0d1522;border-color:#253249}
+.dark .account-list{background:#0d1522;border-color:#253249}.dark .account-list-hint{color:#718099}
 .dark .account-chip{background:#111b2b;border-color:#253249}
 .dark .account-chip.is-active{background:rgba(109,74,255,.12)}
+.dark .account-chip.is-marked:not(.is-active){background:rgba(245,158,66,.07)}
 .dark .account-import-btn,.dark .account-toolbar-btn,.dark .account-chip-remove,.dark .ghost-button{background:#111b2b;border-color:#253249;color:var(--ink)}
 .dark .account-import-btn{color:#cbb8ff;border-color:rgba(109,74,255,.35);background:rgba(109,74,255,.12)}
 .dark .account-batch-button{color:#fff}.dark .account-batch-select{background:#1a2537}
