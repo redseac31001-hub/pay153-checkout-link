@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>PAY.153 · 管理中心</title>
+  <meta name="description" content="PAY.153 本地代理池、账单档案、ASN 推荐与成功节点管理中心">
+  <link rel="stylesheet" href="/static/styles.css?v=20260812-risk-freeze01">
+  <link rel="stylesheet" href="/static/manage.css?v=20260810-manage01">
+</head>
+<body class="manage-page">
+  <div class="paper-noise"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="PAY.153 工作台">
+      <span class="brand-mark"><i></i>P</span>
+      <span><b>PAY.153</b><small>OPERATIONS CENTER</small></span>
+    </a>
+    <div class="top-actions">
+      <a class="protocol-nav-link" href="/">工作台</a>
+      <span class="service-dot"><i></i> 本地管理</span>
+      <button id="manageThemeToggle" class="icon-button" type="button" aria-label="切换主题">◐</button>
+    </div>
+  </header>
+
+  <main class="manage-shell">
+    <section id="manageLogin" class="manage-login panel" hidden>
+      <div class="manage-login-mark">02</div>
+      <div class="eyebrow"><span>AUTH</span> PRIVATE OPERATIONS</div>
+      <h1>进入管理中心。</h1>
+      <p>代理池、账单档案和成功节点只保存在本地管理数据库。登录后默认只展示脱敏信息。</p>
+      <form id="manageLoginForm" class="manage-login-form">
+        <label class="field"><span>管理密码</span><input id="managePassword" type="password" autocomplete="current-password" required placeholder="PAY153_MANAGE_PASSWORD"></label>
+        <button class="primary-button" type="submit"><span>登录管理中心</span><i>→</i></button>
+      </form>
+      <p id="manageLoginStatus" class="manage-message" role="status"></p>
+      <div class="security-note"><b>本地安全边界</b><span>Access Token 不会被此页面导入；代理凭据和账单字段由后端 Fernet 密钥加密。</span></div>
+    </section>
+
+    <div id="manageApp" hidden>
+      <section class="manage-hero">
+        <div>
+          <div class="eyebrow"><span>02</span> OPERATIONS CENTER</div>
+          <h1>配置、记录、<em>复盘。</em></h1>
+          <p>把支付方式共用的代理池、账单地址、国家推荐和成功节点放在一个可追踪的本地后台。浏览器 localStorage 仍是工作台缓存，只有点击导入才会写入这里。</p>
+        </div>
+        <div class="manage-hero-aside">
+          <span class="hero-aside-label">STORAGE</span>
+          <strong>LOCAL SQLITE</strong>
+          <span>敏感字段加密 · 列表默认脱敏</span>
+          <div class="manage-hero-actions">
+            <button id="refreshAll" class="secondary-button" type="button">刷新数据</button>
+            <button id="importLocalConfig" class="primary-button" type="button">导入浏览器配置</button>
+          </div>
+        </div>
+      </section>
+
+      <div id="manageGlobalMessage" class="manage-message" role="status"></div>
+
+      <section class="manage-stat-grid" aria-label="管理概览">
+        <article class="manage-stat"><span>本机账号</span><strong id="statAccounts">—</strong><small id="statAccountRisk">优惠 / 支付 / 风控状态</small></article>
+        <article class="manage-stat"><span>代理池</span><strong id="statProxyPools">—</strong><small>入口 / 支付出口</small></article>
+        <article class="manage-stat"><span>账单档案</span><strong id="statBillingProfiles">—</strong><button id="addressLibraryOverview" class="text-button" type="button" data-jump="addresses"><b id="statBuiltinAddresses">—</b> 条内置地址 →</button><small id="statBuiltinCountries">等待地址库</small></article>
+        <article class="manage-stat"><span>ASN 区域</span><strong id="statAsnRegions">—</strong><small>本地推荐顺序</small></article>
+        <article class="manage-stat"><span>成功节点</span><strong id="statSuccessRecords">—</strong><small>账号哈希与出口记录</small></article>
+        <article class="manage-stat manage-stat-last"><span>最近成功</span><strong id="statLastSuccess">—</strong><small id="statLastSuccessMeta">等待数据</small></article>
+      </section>
+
+      <div class="manage-layout">
+        <nav class="manage-nav" aria-label="管理中心导航">
+          <div class="manage-nav-label">MODULES</div>
+          <button class="manage-nav-item active" type="button" data-section="overview"><span>01</span> 总览</button>
+          <button class="manage-nav-item" type="button" data-section="accounts"><span>02</span> 账号状态</button>
+          <button class="manage-nav-item" type="button" data-section="proxies"><span>03</span> 代理池</button>
+          <button class="manage-nav-item" type="button" data-section="billing"><span>04</span> 账单档案</button>
+          <button class="manage-nav-item" type="button" data-section="addresses"><span>05</span> 内置地址库</button>
+          <button class="manage-nav-item" type="button" data-section="asn"><span>06</span> 国家 / ASN</button>
+          <button class="manage-nav-item" type="button" data-section="successes"><span>07</span> 成功节点</button>
+          <button class="manage-nav-item" type="button" data-section="logs"><span>08</span> 任务日志</button>
+          <div class="manage-nav-footer"><span>SESSION</span><b>已验证管理会话</b><button id="manageLogout" type="button">退出登录</button></div>
+        </nav>
+
+        <div class="manage-content">
+          <section class="manage-section active" data-panel="overview">
+            <div class="section-heading"><div><div class="eyebrow"><span>01</span> OVERVIEW</div><h2>今天的操作面。</h2><p>先看数据是否齐全，再进入具体配置。</p></div><span class="section-status">LIVE LOCAL</span></div>
+            <div class="overview-grid">
+              <article class="panel manage-card"><div class="card-kicker">DATA BOUNDARY</div><h3>哪些数据进入后台？</h3><p>成功任务只写入账号哈希、地区、代理出口和链接密文。Token 不进入 localStorage 导入接口，也不进入管理数据库。</p><div class="boundary-list"><span><i class="dot dot-good"></i>代理凭据 · 加密</span><span><i class="dot dot-good"></i>账单字段 · 加密</span><span><i class="dot dot-muted"></i>Token · 不导入</span><span><i class="dot dot-muted"></i>列表 · 默认脱敏</span></div></article>
+              <article class="panel manage-card"><div class="card-kicker">WORKFLOW</div><h3>推荐的维护顺序</h3><ol class="workflow-list"><li><b>01</b><span>先维护国家对应的代理池</span></li><li><b>02</b><span>再为支付方式选择账单档案</span></li><li><b>03</b><span>用成功节点和日志复盘线路</span></li></ol></article>
+            </div>
+            <div class="section-heading compact"><div><h3>最近成功节点</h3><p>仅展示已脱敏字段。</p></div><button class="text-button" type="button" data-jump="successes">查看全部 →</button></div>
+            <div class="table-card panel"><div class="table-scroll"><table><thead><tr><th>时间</th><th>通道</th><th>账号</th><th>入口 / 支付</th><th>地区</th><th>状态</th></tr></thead><tbody id="overviewSuccessTable"></tbody></table></div><div id="overviewSuccessEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="accounts" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>02</span> ACCOUNT STATUS</div><h2>账号状态列表。</h2><p>读取当前浏览器本机账号元数据，汇总优惠资格、支付方式和拒绝/冷却信号。</p></div><span class="section-status">LOCAL ONLY</span></div>
+            <div class="account-management-note panel"><strong>隐私边界</strong><span>本列表只读同源 localStorage 的脱敏状态；Access Token 不上传管理接口，也不在表格中展示。支付方式未被接口明确返回时显示“未检测”；连续三次明确 block 会进入本机冻结。</span><a class="text-button" href="/">回工作台导入账号 →</a></div>
+            <div class="filter-bar panel">
+              <label class="filter-wide"><span>搜索</span><input id="accountQuery" placeholder="邮箱、账号 ID、来源或任务"></label>
+              <label><span>优惠</span><select id="accountPromoFilter"><option value="">全部</option><option value="supported">支持</option><option value="unsupported">不支持 / 未生效</option><option value="unknown">未检测</option></select></label>
+              <label><span>风险</span><select id="accountRiskFilter"><option value="">全部</option><option value="clear">未发现拒绝</option><option value="rejected">最近被拒</option><option value="cooldown">本机冷却</option><option value="blocked">疑似封禁</option><option value="frozen">冻结（连续 block）</option><option value="unknown">未检测</option></select></label>
+              <label><span>支付方式</span><select id="accountMethodFilter"><option value="">全部</option><option value="paypal">PayPal</option><option value="gopay">Gopay</option><option value="ideal">iDEAL</option><option value="upi">UPI</option><option value="pix">PIX</option><option value="card">Card</option></select></label>
+              <button id="refreshAccounts" class="secondary-button" type="button">刷新</button>
+            </div>
+            <div class="section-heading compact"><div><h3>当前浏览器账号</h3><p>状态来自最近一次任务结果；“疑似封禁”仅表示响应出现明确账号封禁信号，不代表永久结论。</p></div><span id="accountListMeta" class="section-status">0 个账号</span></div>
+            <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>账号</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 结果</th><th>来源 / 任务</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="proxies" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>03</span> PROXY POOLS</div><h2>代理池配置。</h2><p>按支付方式、国家和用途记录入口与支付出口；实际任务仍由工作台提交。</p></div><span class="section-status">CREDENTIALS SEALED</span></div>
+            <form id="proxyForm" class="panel editor-card">
+              <input id="proxyId" type="hidden">
+              <div class="editor-header"><div><span class="section-index">P</span><div><h3 id="proxyFormTitle">新增代理池</h3><p>凭据只在保存时发送到本地后端，列表默认只显示前三条脱敏预览。</p></div></div><button id="resetProxyForm" class="text-button" type="button">清空表单</button></div>
+              <div class="form-grid form-grid-4">
+                <label class="field"><span>名称</span><input id="proxyName" required maxlength="120" placeholder="例如 Gopay · 印尼支付"></label>
+                <label class="field"><span>支付方式</span><input id="proxyRail" maxlength="40" placeholder="gopay / shared"></label>
+                <label class="field"><span>国家代码</span><input id="proxyCountry" maxlength="2" placeholder="ID"></label>
+                <label class="field"><span>用途</span><select id="proxyKind"><option value="entry">入口 / 优惠更新</option><option value="exit">支付出口</option></select></label>
+              </div>
+              <div class="form-grid form-grid-2">
+                <label class="field"><span>地区备注 <small>选填</small></span><input id="proxyRegion" maxlength="80" placeholder="例如 Jakarta / Thailand"></label>
+                <label class="toggle-field"><input id="proxyEnabled" type="checkbox" checked><span><b>启用此代理池</b><small>仅作为管理记录状态，不会自动覆盖工作台缓存。</small></span></label>
+              </div>
+              <label class="field"><span>代理列表 <small>每行一条，支持 host:port:user:pass / URL</small></span><textarea id="proxyData" required spellcheck="false" placeholder="http://user:password@host:port"></textarea></label>
+              <div class="editor-actions"><span id="proxyFormStatus" class="form-status"></span><button class="primary-button" type="submit"><span>保存代理池</span><i>→</i></button></div>
+            </form>
+            <div class="section-heading compact"><div><h3>已保存代理池</h3><p>共用配置可通过 `shared` 方式维护，Gopay 仍保持两池模型。</p></div><button id="refreshProxies" class="text-button" type="button">刷新 →</button></div>
+            <div class="table-card panel"><div class="table-scroll"><table><thead><tr><th>名称</th><th>通道 / 国家</th><th>用途</th><th>数量</th><th>预览</th><th>状态</th><th></th></tr></thead><tbody id="proxyTable"></tbody></table></div><div id="proxyEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="billing" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>04</span> BILLING PROFILES</div><h2>账单地址档案。</h2><p>维护页是手动档案的后台版本；自动生成的地址仍由现有地址库逻辑负责。</p></div><span class="section-status">FIELDS SEALED</span></div>
+            <form id="billingForm" class="panel editor-card">
+              <div class="editor-header"><div><span class="section-index">B</span><div><h3 id="billingFormTitle">新增账单档案</h3><p>建议用 `支付方式:国家` 作为档案键，例如 `gopay:ID`。</p></div></div><button id="resetBillingForm" class="text-button" type="button">清空表单</button></div>
+              <input id="billingId" type="hidden">
+              <div class="form-grid form-grid-4">
+                <label class="field"><span>档案键</span><input id="billingProfileKey" required maxlength="180" placeholder="gopay:ID"></label>
+                <label class="field"><span>支付方式</span><input id="billingRail" maxlength="40" placeholder="gopay"></label>
+                <label class="field"><span>国家代码</span><input id="billingCountry" required maxlength="2" placeholder="ID"></label>
+                <label class="field"><span>州 / 省</span><input id="billingRegion" maxlength="80" placeholder="Jakarta"></label>
+              </div>
+              <div class="form-grid form-grid-2">
+                <label class="field"><span>账单姓名</span><input id="billingName" maxlength="160" placeholder="真实账单姓名或企业名称"></label>
+                <label class="field"><span>账单邮箱</span><input id="billingEmail" type="email" maxlength="200" placeholder="name@example.com"></label>
+              </div>
+              <div class="form-grid form-grid-2"><label class="field"><span>地址第一行</span><input id="billingLine1" required maxlength="180" placeholder="真实街道地址"></label><label class="field"><span>地址第二行 <small>选填</small></span><input id="billingLine2" maxlength="180" placeholder="公寓 / 楼层"></label></div>
+              <div class="form-grid form-grid-3"><label class="field"><span>城市</span><input id="billingCity" required maxlength="100" placeholder="Jakarta"></label><label class="field"><span>州 / 地区 <small>选填</small></span><input id="billingState" maxlength="80" placeholder="Jakarta"></label><label class="field"><span>邮编</span><input id="billingPostalCode" required maxlength="30" placeholder="10110"></label></div>
+              <div class="editor-actions"><span id="billingFormStatus" class="form-status"></span><button class="primary-button" type="submit"><span>保存账单档案</span><i>→</i></button></div>
+            </form>
+            <div class="section-heading compact"><div><h3>已保存档案</h3><p>列表中不显示完整邮箱和地址。</p></div><button id="refreshBilling" class="text-button" type="button">刷新 →</button></div>
+            <div class="table-card panel"><div class="table-scroll"><table><thead><tr><th>档案键</th><th>方式 / 国家</th><th>姓名</th><th>邮箱</th><th>地址预览</th><th>来源</th><th></th></tr></thead><tbody id="billingTable"></tbody></table></div><div id="billingEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="addresses" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>05</span> BUILTIN ADDRESS LIBRARY</div><h2>内置公共地址库。</h2><p>自动地址解析器使用的只读候选地址；这些公开信息不会写入手工档案。</p></div><span class="section-status">READ-ONLY</span></div>
+            <div class="filter-bar panel">
+              <label><span>国家</span><select id="addressCountryFilter"><option value="">全部国家</option></select></label>
+              <label><span>地址类型</span><select id="addressTypeFilter"><option value="">全部类型</option><option value="residential">住宅</option><option value="student">学生宿舍</option><option value="school">学校/大学</option><option value="office">办公室</option><option value="company">企业</option></select></label>
+              <button id="refreshAddresses" class="secondary-button" type="button">刷新</button>
+              <span id="addressesCount" class="section-status">0 条地址</span>
+            </div>
+            <div class="table-card panel"><div class="table-scroll"><table><thead><tr><th>国家</th><th>类型</th><th>名称</th><th>地址</th><th>城市</th><th>州/地区</th><th>邮编</th></tr></thead><tbody id="addressesTable"></tbody></table></div><div id="addressesEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="asn" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>06</span> COUNTRY / ASN</div><h2>国家推荐顺序。</h2><p>这里维护的是参考顺序；真正代理线路仍以代理池条目和实测出口为准。</p></div><span class="section-status">LOCAL REFERENCE</span></div>
+            <form id="asnForm" class="panel editor-card">
+              <div class="editor-header"><div><span class="section-index">A</span><div><h3>维护国家 ASN 推荐</h3><p>一行一个 ASN，保存后同步到管理数据库。</p></div></div><button id="resetAsnForm" class="text-button" type="button">清空表单</button></div>
+              <div class="form-grid form-grid-3"><label class="field"><span>国家代码</span><input id="asnCountry" required maxlength="2" placeholder="GB"></label><label class="field"><span>地区</span><input id="asnRegion" maxlength="80" placeholder="Europe / UK"></label><label class="field"><span>显示名称</span><input id="asnLabel" maxlength="80" placeholder="英国"></label></div>
+              <label class="field"><span>推荐 ASN 列表</span><textarea id="asnItems" required spellcheck="false" placeholder="AS2856&#10;AS5607&#10;AS5089"></textarea></label>
+              <div class="editor-actions"><span id="asnFormStatus" class="form-status"></span><button class="primary-button" type="submit"><span>保存推荐顺序</span><i>→</i></button></div>
+            </form>
+            <div class="section-heading compact"><div><h3>国家列表</h3><p>排序由保存时的列表顺序决定。</p></div><button id="refreshAsn" class="text-button" type="button">刷新 →</button></div>
+            <div id="asnTable" class="asn-manage-list"></div><div id="asnEmpty" class="table-state" hidden></div>
+          </section>
+
+          <section class="manage-section" data-panel="successes" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>07</span> SUCCESS RECORDS</div><h2>成功节点复盘。</h2><p>记录来自任务完成回调；账号、IP、链接默认脱敏。</p></div><span class="section-status">AUDIT TRAIL</span></div>
+            <div class="filter-bar panel"><label><span>搜索</span><input id="successQuery" placeholder="账号、Job ID、城市"></label><label><span>国家</span><input id="successCountry" maxlength="2" placeholder="全部"></label><label><span>通道</span><select id="successLinkType"><option value="">全部通道</option><option value="gopay">Gopay</option><option value="paypal">PayPal</option><option value="hosted">Hosted</option><option value="ideal">iDEAL</option><option value="upi">UPI</option><option value="pix">PIX</option></select></label><button id="refreshSuccesses" class="secondary-button" type="button">查询</button></div>
+            <div class="table-card panel"><div class="table-scroll"><table><thead><tr><th>时间</th><th>Job ID</th><th>通道 / 计划</th><th>账号</th><th>入口</th><th>支付出口</th><th>账单地区</th><th>金额</th></tr></thead><tbody id="successTable"></tbody></table></div><div id="successEmpty" class="table-state" hidden></div></div>
+          </section>
+
+          <section class="manage-section" data-panel="logs" hidden>
+            <div class="section-heading"><div><div class="eyebrow"><span>08</span> TASK LOGS</div><h2>任务日志。</h2><p>按日期、Job ID 和关键词筛选；日志接口会再次做 Token 脱敏。</p></div><span class="section-status">REDACTED</span></div>
+            <div class="filter-bar panel"><label><span>日期</span><input id="logDay" type="date"></label><label><span>Job ID</span><input id="logJobId" placeholder="可选"></label><label class="filter-wide"><span>关键词</span><input id="logQuery" placeholder="例如 Gopay / failed / 代理"></label><button id="refreshLogs" class="secondary-button" type="button">查询</button></div>
+            <div class="log-table-card panel"><div id="logsTable" class="manage-log-list"></div><div id="logsEmpty" class="table-state" hidden></div></div>
+          </section>
+
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer><span>PAY.153.INK</span><p>管理中心只建议在受控的本地网络中开放。</p></footer>
+  <script src="/static/manage.js?v=20260812-risk-freeze01"></script>
+</body>
+</html>

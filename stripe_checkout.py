@@ -34,17 +34,24 @@ STRIPE_VERSION_FULL = (
     "checkout_manual_approval_preview=v1"
 )
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
+PROMO_NOT_APPLIED_ERROR_CODE = "promo_not_applied"
 PAYPAL_STRIPE_VERSION = (
     "2025-03-31.basil; "
     "checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 )
 
-# The proxy pool is the exit hop.  CURLOPT_PRE_PROXY only supports a SOCKS
-# pre-proxy, so the local gateway must be addressed as SOCKS5.  This is
-# different from setting the local gateway as the normal proxy: the latter
-# discards the selected pool exit proxy.
+
+class PromoNotAppliedError(RuntimeError):
+    """最终金额未归零时终止当前任务，不再更换代理重复提交。"""
+
+    error_code = PROMO_NOT_APPLIED_ERROR_CODE
+
+# The proxy pool is the exit hop.  libcurl's CURLOPT_PRE_PROXY only supports a
+# SOCKS first hop.  This is different from setting the local gateway as the
+# normal proxy: the latter discards the selected pool exit proxy and reports
+# the local gateway's country instead of the pool exit's country.
 PROXY_PRE_PROXY_ENV = "PAY153_PROXY_PRE_PROXY"
-DEFAULT_PROXY_PRE_PROXY = "socks5h://127.0.0.1:9697"
+DEFAULT_PROXY_PRE_PROXY = "socks5://127.0.0.1:9697"
 _DISABLED_PROXY_VALUES = {"0", "false", "off", "none", "direct", "disable", "disabled"}
 _SOCKS_PRE_PROXY_SCHEMES = {"socks4", "socks4a", "socks5", "socks5h"}
 
@@ -52,42 +59,51 @@ _SOCKS_PRE_PROXY_SCHEMES = {"socks4", "socks4a", "socks5", "socks5h"}
 def proxy_pre_proxy() -> str | None:
     """Return the first-hop proxy for all configured proxy-pool exits.
 
-    The default intentionally points at the local SOCKS5 gateway requested by
-    the application deployment.  Set ``PAY153_PROXY_PRE_PROXY`` to an empty
-    value or one of the disabled values to use the pool proxy directly.
-
-    Older deployments may still set an ``http://`` value.  Convert that
-    legacy label to ``socks5h://`` because libcurl's PRE_PROXY option cannot
-    chain an HTTP pre-proxy; it only accepts SOCKS.
+    The default points at the local SOCKS5 gateway used by this deployment.
+    Set ``PAY153_PROXY_PRE_PROXY`` to an empty value or one of the disabled
+    values only when direct pool access is intentional.
     """
     value = os.getenv(PROXY_PRE_PROXY_ENV, DEFAULT_PROXY_PRE_PROXY).strip()
     if not value or value.casefold() in _DISABLED_PROXY_VALUES:
         return None
     if "://" not in value:
-        value = f"socks5h://{value}"
+        value = f"socks5://{value}"
     parsed = urlsplit(value)
     scheme = parsed.scheme.casefold()
-    if scheme in {"http", "https"}:
-        value = urlunsplit(("socks5h", parsed.netloc, parsed.path, parsed.query, parsed.fragment))
-        scheme = "socks5h"
     if scheme not in _SOCKS_PRE_PROXY_SCHEMES:
         raise ValueError(
-            f"{PROXY_PRE_PROXY_ENV} 必须是 SOCKS 前置代理（socks5h://host:port）"
+            f"{PROXY_PRE_PROXY_ENV} 必须是 SOCKS 前置代理（socks5://host:port）；"
+            "libcurl 的 PRE_PROXY 不支持 HTTP 前置代理"
         )
     return value
 
 
-def proxy_curl_options() -> dict:
+def proxy_curl_options(proxy: Optional[str] = None) -> dict:
     """Build curl options for the local first-hop proxy.
 
     curl's PRE_PROXY option supports SOCKS pre-proxies and keeps the pool
     entry as the real proxy/exit hop.  Keeping this in one helper makes sync
     and async requests use exactly the same chain.
+
+    Some HTTP proxy gateways (including the current novproxy endpoint) need
+    the proxy endpoint's own Host header on the request sent to the proxy.
+    Without it, a SOCKS-forwarded HTTP CONNECT can be accepted by the local
+    gateway but silently dropped by the upstream proxy.  PROXYHEADER applies
+    only to the proxy hop, so the destination request keeps its real Host.
     """
     pre_proxy = proxy_pre_proxy()
     if not pre_proxy:
         return {}
-    return {CurlOpt.PRE_PROXY: pre_proxy}
+    options = {CurlOpt.PRE_PROXY: pre_proxy}
+    if proxy:
+        proxy_value = proxy if "://" in str(proxy) else f"//{proxy}"
+        parsed = urlsplit(proxy_value)
+        host = parsed.hostname
+        if host:
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            options[CurlOpt.PROXYHEADER] = [f"Host: {host}".encode("ascii")]
+    return options
 
 
 def _load_paypal_fingerprint() -> dict:
@@ -159,9 +175,12 @@ COUNTRY_CURRENCY = {
     "LV": "EUR", "LT": "EUR", "CY": "EUR", "MT": "EUR", "HR": "EUR",
 }
 
-# 支持 PayPal 的下单地区（EU/EUR）。US/USD 只有 card。
-# 新增 GB：英国是欧洲主要市场，支持 PayPal 且 OpenAI 接受 GBP
-PAYPAL_ORDER_COUNTRIES = ["US", "DE", "FR", "IE", "NL", "ES", "IT", "AT", "GB"]
+# 支持 PayPal 直连下单/账单的地区；其他代理出口回退到 DE/EUR。
+# BR、TH、JP、AU 使用各自的本地地区与币种。
+PAYPAL_ORDER_COUNTRIES = [
+    "US", "DE", "FR", "IE", "NL", "ES", "IT", "AT", "GB",
+    "BR", "TH", "JP", "AU",
+]
 
 
 def currency_for_country(country: str) -> str:
@@ -241,7 +260,7 @@ def build_http(proxy: Optional[str]):
 
     http = CffiSession(
         impersonate="chrome136",
-        curl_options=proxy_curl_options() if proxy else {},
+        curl_options=proxy_curl_options(proxy) if proxy else {},
     )
     try:
         http.trust_env = False
@@ -623,7 +642,28 @@ def snapshot_billing(chatgpt_http, access_token: str, session_id: str, processor
         log(f"[stripe] snapshot billing 异常（忽略）: {e}")
 
 
+def _validate_paypal_billing(billing: dict) -> None:
+    """Reject incomplete billing before Stripe can return a vague 400."""
+    if not isinstance(billing, dict):
+        raise RuntimeError("PayPal 账单地址为空")
+    address = billing.get("address")
+    if not isinstance(address, dict):
+        raise RuntimeError("PayPal 账单地址缺少地址对象")
+    required = (
+        ("name", billing.get("name"), "姓名"),
+        ("email", billing.get("email"), "邮箱"),
+        ("country", address.get("country"), "国家"),
+        ("line1", address.get("line1"), "地址1"),
+        ("city", address.get("city"), "城市"),
+        ("postal_code", address.get("postal_code"), "邮编"),
+    )
+    missing = [label for _key, value, label in required if not str(value or "").strip()]
+    if missing:
+        raise RuntimeError(f"PayPal 账单地址不完整，缺少：{'、'.join(missing)}")
+
+
 def create_paypal_payment_method(http, pk: str, billing: dict, session_id: str, version: str, ctx: dict, log) -> str:
+    _validate_paypal_billing(billing)
     guid, muid, sid = _gen_fingerprint()
     guid = ctx.get("guid") or guid
     muid = ctx.get("muid") or muid
@@ -981,12 +1021,28 @@ def paypal_approve_poll_attempts() -> int:
         value = int(os.getenv("PAYPAL_APPROVE_POLL_ATTEMPTS", "6") or 6)
     except (TypeError, ValueError):
         value = 6
+    # 无错误的异步状态最多等待约 12 秒；一旦确认支付方式被拒绝，
+    # poll_redirect_after_approve 会在第 1 次响应立即停止，不会消耗这个上限。
     return max(1, min(12, value))
+
+
+def _paypal_poll_failure_message(ctx: dict | None) -> str:
+    """Return a precise error when approval polling found a terminal decline."""
+    failure = (ctx or {}).get("paypal_poll_failure") or {}
+    if not isinstance(failure, dict):
+        return ""
+    code = str(failure.get("decline_code") or failure.get("code") or "payment_failed").strip()
+    try:
+        attempt = max(1, int(failure.get("attempt") or 1))
+    except (TypeError, ValueError):
+        attempt = 1
+    return f"PayPal 支付方式被拒绝：{code}（approve 后第 {attempt} 次轮询确认）"
 
 
 def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dict | None = None, max_attempts: int = 15) -> str:
     """approve 后 GET /payment_pages/<id> 轮询，拿 next_action.redirect_to_url。"""
-    ctx = ctx or {}
+    ctx = ctx if ctx is not None else {}
+    ctx.pop("paypal_poll_failure", None)
     max_attempts = max(1, int(max_attempts))
     params = {
         "key": pk,
@@ -1042,12 +1098,38 @@ def poll_redirect_after_approve(http, pk: str, session_id: str, log, *, ctx: dic
             f"decline_code={decline_code} "
             f"decline_message={decline_msg}"
         )
-        # generic_decline 诊断：记录可能的原因
-        if "generic_decline" in decline_code or "generic_decline" in decline_msg.lower():
+        # generic_decline / submission failed：跳转不会再出现，立即停轮询省流量。
+        sub_failed = str(sa or "").lower() == "failed"
+        setup_status = str(setup_intent.get("status") or "").lower()
+        risk_decline = (
+            "generic_decline" in str(decline_code).lower()
+            or "generic_decline" in str(decline_msg).lower()
+            or "setup_attempt_failed" in str(decline_code).lower()
+            or (sub_failed and bool(decline_code or decline_msg))
+            or (setup_status == "requires_payment_method" and bool(decline_code or decline_msg))
+        )
+        if risk_decline:
+            ctx["paypal_poll_failure"] = {
+                "attempt": i + 1,
+                "code": str(decline.get("code") or ""),
+                "decline_code": decline_code,
+                "decline_message": decline_msg[:240],
+                "sub_state": str(sa or ""),
+                "setup_status": setup_status,
+            }
             log(
-                "[stripe] ⚠️ generic_decline 检测（常见原因）：1) 代理 IP 被 PayPal 风控；"
-                "2) 账单地址与 PayPal 账户国家不匹配；3) Stripe 指纹字段冲突"
+                "[stripe] ⚠️ 检测到支付风控/拒绝"
+                f"（decline_code={decline_code or '-'} sub_state={sa or '-'} setup_status={setup_status or '-'}），"
+                "停止继续轮询以避免空转"
             )
+            try:
+                import pathlib
+                pathlib.Path("_poll_last_response.json").write_text(
+                    json.dumps(gj if gj else {}, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception:
+                pass
+            return ""
         if i + 1 < max_attempts:
             time.sleep(1)
 
@@ -1213,6 +1295,7 @@ def stripe_to_paypal_redirect(
     """init→elements→create paypal pm→confirm(→manual approve)，返回 (redirect_url, pk, ctx)。"""
     profile = _profile(country)
     payment_billing = payment_billing or billing
+    _validate_paypal_billing(payment_billing)
     payment_http = payment_http or http
     ctx_payment_country = str((payment_billing.get("address") or {}).get("country") or country).upper()
     pk = publishable_key or verify_pk(http, session_id, log)
@@ -1244,13 +1327,13 @@ def stripe_to_paypal_redirect(
     checkout_amount = ctx.get("checkout_amount")
     if require_zero_due:
         if checkout_amount is None:
-            raise RuntimeError("优惠金额校验失败：Stripe 未返回今日应付金额")
+            raise PromoNotAppliedError("优惠金额校验失败：Stripe 未返回今日应付金额")
         try:
             promo_applied = int(str(checkout_amount)) == 0
         except ValueError:
             promo_applied = str(checkout_amount).strip() in {"0", "0.0", "0.00"}
         if not promo_applied:
-            raise RuntimeError(f"Plus 首月免费优惠未生效：Stripe 今日应付 amount={checkout_amount}")
+            raise PromoNotAppliedError(f"Plus 首月免费优惠未生效：Stripe 今日应付 amount={checkout_amount}")
         log("[paypal] 第 4/7 步：金额校验通过，Stripe 今日应付 amount=0")
         ctx["promo_applied"] = True
     else:
@@ -1337,8 +1420,18 @@ def stripe_to_paypal_redirect(
                 payment_http, pk, session_id, log, ctx=ctx, max_attempts=poll_attempts,
             )
             if not redirect_url:
+                decline_message = _paypal_poll_failure_message(ctx)
+                if decline_message:
+                    log(f"[paypal] {decline_message}；无需继续轮询，直接结束本轮")
+                    raise RuntimeError(decline_message)
+                # 短路：直接抛错，交给外层换代理 + 重建账单 + 重建完整链路。
+                # 非拒绝型的轮询超时才走这里：不补交，交给外层换代理重建完整链路。
+                log(
+                    f"[paypal] 轮询 {poll_attempts} 次超时（多为 PM 被 generic_decline），"
+                    "跳过 SetupIntent 补交，直接更换代理重建完整链路"
+                )
                 raise RuntimeError(
-                    f"PayPal approve 已成功，但轮询 {poll_attempts} 次仍未返回跳转地址，正在更换代理重新尝试"
+                    f"PayPal approve 已成功，但轮询 {poll_attempts} 次未返回跳转地址，正在更换代理重新尝试"
                 )
 
     if not redirect_url:

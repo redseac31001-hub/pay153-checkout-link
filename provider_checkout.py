@@ -348,7 +348,10 @@ def default_billing(
     require_profile: bool = False,
 ) -> dict[str, Any]:
     country = (country or "US").upper()
-    if billing_profile is not None or require_profile:
+    # An empty dict is what the UI sends for automatic address selection.  It
+    # must not be interpreted as a user-supplied profile, otherwise the
+    # manual-profile branch returns blank city/postal fields.
+    if billing_profile or require_profile:
         profile = normalize_billing_profile(
             billing_profile,
             country,
@@ -1195,13 +1198,13 @@ def stripe_to_provider(
             log(f"[promo] 本轮延后到 PaymentMethod 挂载后应用优惠，当前 amount={checkout_amount}")
         else:
             if checkout_amount is None:
-                raise RuntimeError("优惠金额校验失败：Stripe 未返回今日应付金额")
+                raise sc.PromoNotAppliedError("优惠金额校验失败：Stripe 未返回今日应付金额")
             try:
                 promo_applied = int(str(checkout_amount)) == 0
             except ValueError:
                 promo_applied = str(checkout_amount).strip() in {"0", "0.0", "0.00"}
             if not promo_applied:
-                raise RuntimeError(f"Plus 首月免费优惠未生效：Stripe 今日应付 amount={checkout_amount}")
+                raise sc.PromoNotAppliedError(f"Plus 首月免费优惠未生效：Stripe 今日应付 amount={checkout_amount}")
             if provider == "upi":
                 upi_options = (
                     (init_data.get("payment_method_options") or {}).get("upi")
@@ -1278,7 +1281,7 @@ def stripe_to_provider(
                 except (TypeError, ValueError):
                     promo_applied = str(promo_amount).strip() in {"0", "0.0", "0.00"}
                 if not promo_applied:
-                    raise RuntimeError(f"延后应用优惠未归零：Stripe 今日应付 amount={promo_amount}")
+                    raise sc.PromoNotAppliedError(f"延后应用优惠未归零：Stripe 今日应付 amount={promo_amount}")
                 checkout_amount = promo_amount
                 log(f"[{provider}] 延后优惠金额校验通过：Stripe 今日应付 amount=0")
             approve_callback(processor)

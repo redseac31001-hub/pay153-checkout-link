@@ -85,6 +85,33 @@ class ProxyProbeTests(unittest.TestCase):
         self.assertEqual(http.calls[0][0], app.PROXY_PROBE_URLS[0])
         self.assertEqual(http.calls[1][0], app.PROXY_PROBE_URLS[1])
 
+    def test_probe_retries_another_random_proxy_after_a_transient_failure(self):
+        proxies = [
+            "http://first.example:8080",
+            "http://second.example:8080",
+            "http://third.example:8080",
+        ]
+        identity = {
+            "ip": "203.0.113.9",
+            "country": "GB",
+            "country_name": "United Kingdom",
+        }
+        with patch.object(app.secrets, "choice", return_value=proxies[0]), patch.object(
+            app.random.SystemRandom, "shuffle", lambda _self, values: None,
+        ), patch.object(
+            app, "probe_proxy_identity", side_effect=[RuntimeError("timeout"), identity]
+        ) as probe:
+            response = app.app.test_client().post(
+                "/api/proxy-probe",
+                json={"pool": "代理池 2", "proxies": proxies},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["selected_index"], 2)
+        self.assertEqual(response.get_json()["country"], "GB")
+        self.assertEqual(probe.call_args_list[0].args, (proxies[0],))
+        self.assertEqual(probe.call_args_list[1].args, (proxies[1],))
+
 
 if __name__ == "__main__":
     unittest.main()

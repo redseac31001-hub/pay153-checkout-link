@@ -13,13 +13,17 @@ import time
 import uuid
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
-from flask import Flask, jsonify, request, send_from_directory
+from cryptography.fernet import Fernet
+from flask import Flask, jsonify, request, send_from_directory, session
 from curl_cffi import requests
 
+from manage_defaults import DEFAULT_ASN_RECOMMENDATIONS
+from manage_store import ManageStore
 import stripe_checkout as sc
 from provider_checkout import (
     PROVIDER_DEFAULTS,
@@ -30,18 +34,55 @@ from provider_checkout import (
 from sentinel_token import SentinelTokenProvider as BaseSentinel
 
 # 加载 .env 文件中的环境变量
+ROOT = Path(__file__).resolve().parent
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(ROOT / ".env")  # 使用绝对路径加载 .env
 except ImportError:
     pass  # python-dotenv 未安装，跳过
-
-
-ROOT = Path(__file__).resolve().parent
 BACKEND_LOG_DIR = Path(os.getenv("PAY153_LOG_DIR", str(ROOT / "logs")))
 LEGACY_SERVICE_BASE = str(os.getenv("PAY153_LEGACY_BASE", "")).rstrip("/")
 app = Flask(__name__, static_folder=str(ROOT / "static"), static_url_path="/static")
 app.config["JSON_AS_ASCII"] = False
+app.config["SECRET_KEY"] = os.getenv("PAY153_SESSION_SECRET", "").strip() or secrets.token_hex(32)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+
+def _manage_key() -> bytes:
+    configured = os.getenv("PAY153_MANAGE_ENCRYPTION_KEY", "").strip()
+    if configured:
+        try:
+            Fernet(configured.encode("ascii"))
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("PAY153_MANAGE_ENCRYPTION_KEY 不是有效的 Fernet 密钥") from exc
+        return configured.encode("ascii")
+
+    key_path = Path(os.getenv("PAY153_MANAGE_KEY_FILE", str(ROOT / "data" / ".manage.key")))
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key = key_path.read_bytes().strip()
+        Fernet(key)
+        return key
+    except FileNotFoundError:
+        key = Fernet.generate_key()
+        key_path.write_bytes(key + b"\n")
+        try:
+            key_path.chmod(0o600)
+        except OSError:
+            pass
+        return key
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError(f"管理密钥文件无效：{key_path}") from exc
+
+
+MANAGE_PASSWORD = os.getenv("PAY153_MANAGE_PASSWORD", "").strip()
+MANAGE_STORE = ManageStore(
+    os.getenv("PAY153_MANAGE_DB", str(ROOT / "data" / "pay153_manage.sqlite3")),
+    _manage_key(),
+    ROOT / "data" / "success_links.jsonl",
+)
+MANAGE_STORE.seed_asn_recommendations(DEFAULT_ASN_RECOMMENDATIONS)
 
 STRIPE_CHECKOUT_FRAGMENT = (
     "#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPyd%2FbScpJ3ZwZ3Zmd2x1cWxqa1Brb"
@@ -59,7 +100,18 @@ _OPENAI_CHECKOUT_SESSION_RE = re.compile(r"oaics_[A-Za-z0-9_]+")
 
 CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
 OAICS_CONVERSION_FAILED_ERROR_CODE = "oaics_conversion_failed_retry"
+PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE = "paypal_generic_decline_fuse"
+PROMO_NOT_APPLIED_ERROR_CODE = sc.PROMO_NOT_APPLIED_ERROR_CODE
+ACCOUNT_BLOCK_FUSE_ERROR_CODE = "account_blocked_fuse"
+ACCOUNT_BLOCK_STREAK_LIMIT = max(
+    1, int(os.getenv("PAY153_ACCOUNT_BLOCK_STREAK", "3") or 3)
+)
 MAX_OAICS_RETRY = 0  # OpenAI 已全面切换到 oaics_*，禁用重试以节省时间
+# 连续同类 PayPal 风控拒绝达到该次数后结束任务（非官方冷却时长，仅为工程降频）。
+# Stripe/PayPal 公开文档未给出 generic_decline 固定等待分钟数。
+PAYPAL_GENERIC_DECLINE_STREAK_LIMIT = max(
+    1, int(os.getenv("PAYPAL_GENERIC_DECLINE_STREAK", "3") or 3)
+)
 
 
 class CheckoutSessionContractError(RuntimeError):
@@ -72,6 +124,46 @@ class OaicsConversionFailedError(RuntimeError):
     """当 oaics_* 无法转换为 cs_live_* 时抛出，触发外层重试逻辑。"""
 
     error_code = OAICS_CONVERSION_FAILED_ERROR_CODE
+
+
+class PaypalGenericDeclineFuseError(RuntimeError):
+    """连续多次 PayPal generic_decline 后熔断，避免无脑打满重试。"""
+
+    error_code = PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE
+
+
+def is_account_block_error(error: str, error_code: str = "") -> bool:
+    """判断是否收到明确的账号封禁/停用信号。"""
+    code = str(error_code or "").strip().lower()
+    if re.search(r"account_(?:blocked|banned|suspended|restricted)", code):
+        return True
+    text = str(error or "")
+    return bool(re.search(
+        r"(?:account|账号|账户).{0,40}(?:blocked|banned|suspend|denied|封禁|停用|冻结|禁止|拒绝)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def is_paypal_risk_decline_error(error: str, error_code: str = "") -> bool:
+    """判断是否为 PayPal/Stripe 支付风控类拒绝（可计入连续熔断）。"""
+    code = str(error_code or "").strip().lower()
+    if code in {PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE, "paypal_generic_decline"}:
+        return True
+    text = str(error or "")
+    lowered = text.lower()
+    if "generic_decline" in lowered:
+        return True
+    if "setup_attempt_failed" in lowered:
+        return True
+    if "checkout_approval_payment_failure" in lowered:
+        return True
+    # 短路轮询超时在实测中几乎总是 PM 已被拒（见 _poll_last_response.json）
+    if ("approve" in lowered or "轮询" in text) and "未返回跳转" in text:
+        return True
+    if "支付被拒绝" in text or "支付通道拒绝" in text:
+        return True
+    return False
 
 
 def is_stripe_checkout_session_id(value: Any) -> bool:
@@ -170,80 +262,6 @@ def extract_stripe_checkout_session_id(payload: Any, raw_text: str = "") -> str:
     return visit(payload) or visit(raw_text)
 
 
-def _checkout_field_value_kind(key: str, value: Any) -> str:
-    """Return a small, non-sensitive description for a checkout response field."""
-    if value is None:
-        return "null"
-    if isinstance(value, dict):
-        return "<object>"
-    if isinstance(value, (list, tuple)):
-        return f"<array:{len(value)}>"
-    text = str(value).strip()
-    if not text:
-        return "<empty>"
-    lowered_key = str(key).lower()
-    if "url" in lowered_key:
-        return "<url>"
-    if "secret" in lowered_key or "publishable" in lowered_key or lowered_key in {"key", "token"}:
-        return "<redacted>"
-    for pattern, label in (
-        (r"oaics_[A-Za-z0-9]+", "oaics_*"),
-        (r"cs_live_[A-Za-z0-9]+", "cs_live_*"),
-        (r"cs_test_[A-Za-z0-9]+", "cs_test_*"),
-        (r"pm_[A-Za-z0-9]+", "pm_*"),
-        (r"pi_[A-Za-z0-9]+", "pi_*"),
-        (r"seti_[A-Za-z0-9]+", "seti_*"),
-    ):
-        if re.search(pattern, text):
-            return label
-    if "id" in lowered_key or "session" in lowered_key:
-        return f"<string:{len(text)}>"
-    return f"<string:{len(text)}>"
-
-
-def summarize_checkout_response(payload: Any) -> str:
-    """Summarize checkout response shape without logging IDs, keys, or URLs.
-
-    The create/update endpoints are private and their response schema can
-    change independently of Stripe.  Logging only field names and value kinds
-    makes that change diagnosable without persisting payment credentials or
-    session material.
-    """
-    if not isinstance(payload, dict):
-        return f"type={type(payload).__name__}"
-
-    root_keys = [str(key) for key in payload.keys()]
-    checkout_session_keys: list[str] = []
-    interesting: list[str] = []
-    seen_paths: set[str] = set()
-
-    def walk(value: Any, path: str = "", depth: int = 0) -> None:
-        if depth > 8:
-            return
-        if isinstance(value, dict):
-            if path.rsplit(".", 1)[-1] == "checkout_session":
-                checkout_session_keys.extend(str(key) for key in value.keys())
-            for key, item in value.items():
-                key_text = str(key)
-                item_path = f"{path}.{key_text}" if path else key_text
-                lowered = key_text.lower()
-                if (
-                    "id" in lowered
-                    or "url" in lowered
-                    or "session" in lowered
-                    or "payment" in lowered
-                    or "secret" in lowered
-                    or "publishable" in lowered
-                    or lowered in {"processor", "processor_entity", "tag"}
-                ) and item_path not in seen_paths:
-                    seen_paths.add(item_path)
-                    interesting.append(
-                        f"{item_path}={_checkout_field_value_kind(key_text, item)}"
-                    )
-                walk(item, item_path, depth + 1)
-        elif isinstance(value, (list, tuple)):
-            for index, item in enumerate(value[:20]):
-                walk(item, f"{path}[{index}]", depth + 1)
 _CHECKOUT_PAYMENT_METHOD_COLLECTION_KEYS = frozenset({
     "payment_method_types",
     "ordered_payment_method_types",
@@ -323,6 +341,80 @@ def checkout_supports_paypal(payload: Any) -> bool:
     return "paypal" in extract_checkout_payment_methods(payload)
 
 
+def _checkout_field_value_kind(key: str, value: Any) -> str:
+    """Return a small, non-sensitive description for a checkout response field."""
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return "<object>"
+    if isinstance(value, (list, tuple)):
+        return f"<array:{len(value)}>"
+    text = str(value).strip()
+    if not text:
+        return "<empty>"
+    lowered_key = str(key).lower()
+    if "url" in lowered_key:
+        return "<url>"
+    if "secret" in lowered_key or "publishable" in lowered_key or lowered_key in {"key", "token"}:
+        return "<redacted>"
+    for pattern, label in (
+        (r"oaics_[A-Za-z0-9]+", "oaics_*"),
+        (r"cs_live_[A-Za-z0-9]+", "cs_live_*"),
+        (r"cs_test_[A-Za-z0-9]+", "cs_test_*"),
+        (r"pm_[A-Za-z0-9]+", "pm_*"),
+        (r"pi_[A-Za-z0-9]+", "pi_*"),
+        (r"seti_[A-Za-z0-9]+", "seti_*"),
+    ):
+        if re.search(pattern, text):
+            return label
+    if "id" in lowered_key or "session" in lowered_key:
+        return f"<string:{len(text)}>"
+    return f"<string:{len(text)}>"
+
+
+def summarize_checkout_response(payload: Any) -> str:
+    """Summarize checkout response shape without logging IDs, keys, or URLs.
+
+    The create/update endpoints are private and their response schema can
+    change independently of Stripe.  Logging only field names and value kinds
+    makes that change diagnosable without persisting payment credentials or
+    session material.
+    """
+    if not isinstance(payload, dict):
+        return f"type={type(payload).__name__}"
+
+    root_keys = [str(key) for key in payload.keys()]
+    checkout_session_keys: list[str] = []
+    interesting: list[str] = []
+    seen_paths: set[str] = set()
+
+    def walk(value: Any, path: str = "", depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            if path.rsplit(".", 1)[-1] == "checkout_session":
+                checkout_session_keys.extend(str(key) for key in value.keys())
+            for key, item in value.items():
+                key_text = str(key)
+                item_path = f"{path}.{key_text}" if path else key_text
+                lowered = key_text.lower()
+                if (
+                    "id" in lowered
+                    or "url" in lowered
+                    or "session" in lowered
+                    or "payment" in lowered
+                    or "secret" in lowered
+                    or "publishable" in lowered
+                    or lowered in {"processor", "processor_entity", "tag"}
+                ) and item_path not in seen_paths:
+                    seen_paths.add(item_path)
+                    interesting.append(
+                        f"{item_path}={_checkout_field_value_kind(key_text, item)}"
+                    )
+                walk(item, item_path, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value[:20]):
+                walk(item, f"{path}[{index}]", depth + 1)
 
     walk(payload)
     root = ",".join(root_keys[:40]) or "-"
@@ -409,6 +501,29 @@ def normalize_paypal_checkout_region(country: str, detected_currency: str = "") 
     return "DE", "EUR", f"\u5f53\u524d\u56fd\u5bb6 {country} \u672a\u5217\u5165 PayPal \u8d26\u5355\u5730\u533a\uff0c\u56de\u9000 DE/EUR"
 
 
+def paypal_billing_target_country(
+    checkout_country: str,
+    payment_country: str = "",
+    *,
+    force_checkout_country: bool = False,
+) -> str:
+    """Return the country whose address is used for the PayPal PaymentMethod.
+
+    Direct PayPal regions use the payment-proxy country. Unsupported regions
+    share the DE fallback billing used by the OpenAI Checkout.
+    """
+    checkout_country = str(checkout_country or "DE").strip().upper()
+    payment_country = str(payment_country or "").strip().upper()
+    direct_countries = {
+        str(item).upper() for item in getattr(sc, "PAYPAL_ORDER_COUNTRIES", [])
+    }
+    if force_checkout_country:
+        return checkout_country
+    if payment_country and payment_country in direct_countries:
+        return payment_country
+    return checkout_country
+
+
 class ProxySentinel(BaseSentinel):
     def __init__(self, proxy: str | None, cookies: dict[str, str]):
         super().__init__(impersonate="chrome136", cookies=cookies)
@@ -423,7 +538,7 @@ class ProxySentinel(BaseSentinel):
             }
             if self.proxy:
                 kwargs["proxies"] = {"http": self.proxy, "https": self.proxy}
-                kwargs["curl_options"] = sc.proxy_curl_options()
+                kwargs["curl_options"] = sc.proxy_curl_options(self.proxy)
             self._session = requests.AsyncSession(**kwargs)
         return self._session
 
@@ -730,6 +845,9 @@ def create_checkout(token: str, payload: dict, proxy: str, device_id: str, did: 
     except Exception:
         raise RuntimeError(f"OpenAI Checkout 返回非 JSON：{text[:300]}")
     log(f"[checkout] response schema: {summarize_checkout_response(data)}")
+    detected_methods = extract_checkout_payment_methods(data)
+    if detected_methods:
+        log(f"[checkout] 可用支付方式（脱敏）：{detected_methods}")
     raw_session_id = str(data.get("checkout_session_id") or "").strip()
     url = data.get("url") or ""
     sid = extract_stripe_checkout_session_id(data, text)
@@ -827,9 +945,6 @@ def promo_campaign_from_payload(payload: Any) -> str:
 PROXY_PROBE_URLS = (
     "https://ipinfo.io/json",
     "https://ipapi.co/json/",
-    detected_methods = extract_checkout_payment_methods(data)
-    if detected_methods:
-        log(f"[checkout] ???????????{detected_methods}")
 )
 PROXY_PROBE_URL = PROXY_PROBE_URLS[0]
 PROXY_PROBE_TIMEOUT = 12
@@ -1129,7 +1244,18 @@ class JobStore:
                 ),
                 "attempt": result.get("attempt"),
                 "max_attempts": result.get("max_attempts"),
+                "plan": result.get("plan") or "",
+                "country": result.get("country") or result.get("checkout_country") or "",
+                "entry_ip": result.get("entry_ip") or "",
+                "entry_country": result.get("entry_country") or "",
+                "entry_region": result.get("entry_region") or "",
+                "entry_city": result.get("entry_city") or "",
+                "payment_ip": result.get("payment_ip") or "",
+                "payment_country": result.get("payment_proxy_country") or "",
+                "payment_region": result.get("payment_region") or "",
+                "payment_city": result.get("payment_city") or "",
                 "account_email": result.get("account_email") or "",
+                "account_id": result.get("account_id") or "",
                 "link_type": result.get("link_type") or "",
                 "checkout_amount": result.get("checkout_amount"),
                 "currency": result.get("checkout_currency") or result.get("currency") or "",
@@ -1141,6 +1267,7 @@ class JobStore:
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 path.chmod(0o600)
+            MANAGE_STORE.record_success(record)
         except Exception:
             pass
 
@@ -1314,6 +1441,8 @@ class JobStore:
         used_pairs: set[tuple[str, str]] = set()
         last_error = ""
         paypal_force_de_fallback = False
+        paypal_decline_streak = 0
+        account_block_streak = 0
         for attempt in range(1, max_attempts + 1):
             if self.cancelled(job_id):
                 self.update(job_id, status="cancelled", percent=100, text="任务已停止", error="任务已停止")
@@ -1401,12 +1530,78 @@ class JobStore:
                 time.sleep(1.5)
                 continue
 
-            non_retryable = error_code == CHECKOUT_SESSION_CONTRACT_ERROR_CODE or any(marker in lowered for marker in (
+            if is_account_block_error(last_error, error_code):
+                account_block_streak += 1
+                self.log(
+                    job_id,
+                    f"账号 block 计数 {account_block_streak}/{ACCOUNT_BLOCK_STREAK_LIMIT}："
+                    f"{last_error[:180] or 'account blocked'}",
+                )
+                if account_block_streak >= ACCOUNT_BLOCK_STREAK_LIMIT:
+                    block_msg = (
+                        f"连续 {account_block_streak} 次明确 account block，任务已停止重试；"
+                        "账号建议进入本机冻结，需人工确认后再解冻。"
+                    )
+                    self.log(job_id, block_msg)
+                    self.update(
+                        job_id,
+                        status="error",
+                        percent=100,
+                        text="账号连续 block，任务已停止",
+                        error=block_msg[:1200],
+                        error_code=ACCOUNT_BLOCK_FUSE_ERROR_CODE,
+                    )
+                    return
+            else:
+                account_block_streak = 0
+
+            # PayPal：连续同类风控拒绝达到阈值则熔断，避免无脑打满 retry。
+            # 账号冷却时长由前端本地账号库承担（工程降频，非官方规定）。
+            if current.get("link_type") == "paypal" and is_paypal_risk_decline_error(last_error, error_code):
+                paypal_decline_streak += 1
+                self.log(
+                    job_id,
+                    f"PayPal 风控拒绝计数 {paypal_decline_streak}/{PAYPAL_GENERIC_DECLINE_STREAK_LIMIT}："
+                    f"{last_error[:180] or 'generic_decline'}"
+                )
+                if paypal_decline_streak >= PAYPAL_GENERIC_DECLINE_STREAK_LIMIT:
+                    fuse_msg = (
+                        f"连续 {paypal_decline_streak} 次 PayPal 风控拒绝（多为 generic_decline），"
+                        "任务已停止以避免无脑重试。"
+                        "建议更换支付代理；账号侧建议冷却约 60 分钟后再试"
+                        "（此时长为工程降频策略，非 Stripe/PayPal 官方规定）。"
+                    )
+                    self.log(job_id, fuse_msg)
+                    self.update(
+                        job_id,
+                        status="error",
+                        percent=100,
+                        text="PayPal 风控熔断，任务失败",
+                        error=fuse_msg[:1200],
+                        error_code=PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE,
+                    )
+                    return
+            else:
+                paypal_decline_streak = 0
+
+            non_retryable = error_code in {
+                CHECKOUT_SESSION_CONTRACT_ERROR_CODE,
+                PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE,
+                PROMO_NOT_APPLIED_ERROR_CODE,
+                ACCOUNT_BLOCK_FUSE_ERROR_CODE,
+            } or any(marker in lowered for marker in (
                 "access token", "token_invalidated", "token_expired", "token_revoked", "jwt expired",
-                "计划类型", "提取方式", "任务已停止",
+                "计划类型", "提取方式", "任务已停止", "所选 paypal 账单地址国家",
             ))
             if non_retryable or attempt >= max_attempts:
-                self.update(job_id, status="error", percent=100, text="任务失败", error=last_error[:1200])
+                self.update(
+                    job_id,
+                    status="error",
+                    percent=100,
+                    text="任务失败",
+                    error=last_error[:1200],
+                    error_code=error_code or "",
+                )
                 return
             if (
                 current.get("link_type") == "paypal"
@@ -1434,9 +1629,14 @@ class JobStore:
             exit_pool = entry_pool if provider == "pix" else (options.get("exit_proxies") or entry_pool)
             entry_proxy = options.get("fixed_entry_proxy") or secrets.choice(entry_pool)
             exit_proxy = entry_proxy if provider == "pix" else (options.get("fixed_exit_proxy") or secrets.choice(exit_pool))
+            entry_geo: dict[str, str] = {}
             payment_geo: dict[str, str] = {}
             if provider == "hosted":
                 self.log(job_id, f"代理池共 {len(entry_pool)} 条，本次已自动选择 1 条")
+                try:
+                    entry_geo = probe_proxy_identity(entry_proxy)
+                except Exception as exc:
+                    self.log(job_id, f"入口代理地区记录失败：{type(exc).__name__}")
             elif provider == "pix":
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，本次已自动选择 1 条")
             elif provider == "gopay":
@@ -1449,7 +1649,7 @@ class JobStore:
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，代理池 2 共 {len(exit_pool)} 条，本次已分别自动选择")
             self.log(
                 job_id,
-                "代理链：SOCKS5 本地第一跳已启用（PAY153_PROXY_PRE_PROXY），代理池条目作为最终出口"
+                f"代理链：{sc.proxy_pre_proxy()} 本地第一跳已启用（PAY153_PROXY_PRE_PROXY），代理池条目作为最终出口"
                 if sc.proxy_pre_proxy()
                 else "代理链：未启用 SOCKS5 本地第一跳，代理池直接连接",
             )
@@ -1460,8 +1660,10 @@ class JobStore:
 
             if provider == "pix":
                 self.update(job_id, percent=9, text="第 1/7 步：选择并检测代理")
-                main_country, main_region = proxy_country(entry_proxy)
-                stripe_country, stripe_region = proxy_country(exit_proxy)
+                entry_geo = proxy_geo_cached(entry_proxy)
+                payment_geo = proxy_geo_cached(exit_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                stripe_country, stripe_region = payment_geo.get("country", ""), payment_geo.get("region", "")
                 self.log(job_id, f"PIX 代理校验：代理池 1={main_country}/{main_region}")
                 if main_country != "BR" or stripe_country != "BR":
                     self.log(
@@ -1473,7 +1675,8 @@ class JobStore:
             promo_requested = options["plan"] == "plus" and options.get("use_promo", False)
             if provider == "paypal":
                 self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
-                main_country, main_region = proxy_country(entry_proxy)
+                entry_geo = proxy_geo_cached(entry_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
                 exit_proxy, payment_geo, rejected_countries = select_paypal_exit_proxy(
                     exit_proxy,
                     exit_pool,
@@ -1500,6 +1703,28 @@ class JobStore:
                 options["checkout_country"] = checkout_country
                 options["checkout_currency"] = checkout_currency
                 options["payment_proxy_country"] = payment_country
+                paypal_billing_country = paypal_billing_target_country(
+                    checkout_country,
+                    payment_country,
+                    force_checkout_country=bool(options.get("force_paypal_de_fallback")),
+                )
+                options["paypal_billing_country"] = paypal_billing_country
+                selected_paypal_profile = options.get("paypal_billing_profile") or None
+                if selected_paypal_profile:
+                    selected_country = str(
+                        selected_paypal_profile.get("country") or ""
+                    ).strip().upper()
+                    if selected_country != paypal_billing_country:
+                        raise RuntimeError(
+                            f"所选 PayPal 账单地址国家 {selected_country or '未知'} 与本轮实际账单国家 "
+                            f"{paypal_billing_country} 不一致；请匹配最终 Checkout 地区或改回自动随机地址"
+                        )
+                    selection = options.get("paypal_billing_selection") or {}
+                    self.log(
+                        job_id,
+                        f"PayPal 指定账单地址：source={selection.get('kind') or 'manage'} "
+                        f"country={paypal_billing_country} id={selection.get('id') or '-'}",
+                    )
                 self.log(
                     job_id,
                     f"PayPal 代理池 2 地区：{payment_country}/{payment_region}；"
@@ -1510,8 +1735,10 @@ class JobStore:
                 self.ensure_not_cancelled(job_id)
             if provider == "upi":
                 self.update(job_id, percent=9, text="第 1/7 步：校验 UPI 优惠识别代理与印度支付代理")
-                main_country, main_region = proxy_country(entry_proxy)
-                payment_country, payment_region = proxy_country(exit_proxy)
+                entry_geo = proxy_geo_cached(entry_proxy)
+                payment_geo = proxy_geo_cached(exit_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                payment_country, payment_region = payment_geo.get("country", ""), payment_geo.get("region", "")
                 self.log(job_id, f"UPI 代理校验：优惠识别={main_country}/{main_region}，UPI 支付={payment_country}/{payment_region}，账单=IN/INR")
                 if promo_requested and main_country not in {"TR", "JP"}:
                     self.log(job_id, f"UPI 优惠识别代理当前为 {main_country or '?'}；不限制国家，继续尝试")
@@ -1520,8 +1747,10 @@ class JobStore:
                 self.ensure_not_cancelled(job_id)
             if provider == "ideal":
                 self.update(job_id, percent=9, text="校验 iDEAL 荷兰支付代理")
-                main_country, main_region = proxy_country(entry_proxy)
-                payment_country, payment_region = proxy_country(exit_proxy)
+                entry_geo = proxy_geo_cached(entry_proxy)
+                payment_geo = proxy_geo_cached(exit_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                payment_country, payment_region = payment_geo.get("country", ""), payment_geo.get("region", "")
                 self.log(
                     job_id,
                     f"iDEAL 代理校验：入口={main_country}/{main_region}，"
@@ -1534,8 +1763,10 @@ class JobStore:
                 self.ensure_not_cancelled(job_id)
             if provider == "gopay":
                 self.update(job_id, percent=9, text="校验 Gopay 优惠更新与支付代理")
-                promo_country, promo_region = proxy_country(entry_proxy)
-                payment_country, payment_region = proxy_country(exit_proxy)
+                entry_geo = proxy_geo_cached(entry_proxy)
+                payment_geo = proxy_geo_cached(exit_proxy)
+                promo_country, promo_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                payment_country, payment_region = payment_geo.get("country", ""), payment_geo.get("region", "")
                 main_country, main_region = promo_country, promo_region
                 self.log(
                     job_id,
@@ -1628,6 +1859,16 @@ class JobStore:
                 else:
                     self.log(job_id, "iDEAL 优惠更新使用代理池 1，NL/EUR Checkout 与 Stripe 使用代理池 2")
             session_id = checkout_data.get("checkout_session_id") or ""
+            has_oaics_session = bool(
+                is_openai_checkout_session_id(session_id)
+                or is_openai_checkout_session_id(checkout_data.get("openai_checkout_session_id"))
+            )
+            oaics_payment_methods = (
+                extract_checkout_payment_methods(checkout_data)
+                if has_oaics_session
+                else []
+            )
+            options["_oaics_payment_methods"] = oaics_payment_methods
             if session_id and not is_stripe_checkout_session_id(session_id):
                 # Do not pass an oaics_* OpenAI-owned ID to Stripe's
                 # /v1/payment_pages/<id>/init.  If OpenAI does not expose a
@@ -1673,6 +1914,16 @@ class JobStore:
                     for key in ("publishable_key", "processor_entity", "return_url", "url"):
                         if nested_session.get(key):
                             checkout_data[key] = nested_session[key]
+                for method in extract_checkout_payment_methods(materialized):
+                    if method not in oaics_payment_methods:
+                        oaics_payment_methods.append(method)
+                options["_oaics_payment_methods"] = oaics_payment_methods
+                self.log(
+                    job_id,
+                    "OAICS 支付方式识别（脱敏）："
+                    f"{oaics_payment_methods or ['未暴露']}；"
+                    f"PayPal={'可用' if 'paypal' in oaics_payment_methods else '未确认'}",
+                )
                 resolved_session_id = extract_stripe_checkout_session_id(materialized)
                 if resolved_session_id:
                     checkout_data["openai_checkout_session_id"] = openai_session_id
@@ -1684,6 +1935,11 @@ class JobStore:
                         f"Checkout Session 已映射为 Stripe {session_id[:32]}，后续 Stripe 请求使用该 ID",
                     )
                 else:
+                    # An OAICS response may advertise PayPal without exposing
+                    # a Stripe payment_page.  Do not invent a private
+                    # custom_payment_method/start request from that capability
+                    # flag; keep the browser-backed fallback until a verified
+                    # request/response contract is available.
                     # oaics_* 转换失败，检查是否已重试过
                     current_oaics_retry = options.get("_oaics_retry_count", 0)
                     if current_oaics_retry < MAX_OAICS_RETRY:
@@ -1758,12 +2014,20 @@ class JobStore:
                 "entry_one_click_marker": preflight.get("one_click_trial_eligible"),
                 "checkout_one_click_marker": checkout_data.get("one_click_trial_eligible"),
                 "promotion_eligibility_decided_by": "checkout_approve",
-                "entry_country": str(locals().get("main_country") or "").upper(),
-                "payment_proxy_country": str(options.get("payment_proxy_country") or locals().get("payment_country") or "").upper(),
+                "entry_country": str(entry_geo.get("country") or locals().get("main_country") or "").upper(),
+                "entry_ip": str(entry_geo.get("ip") or ""),
+                "entry_region": str(entry_geo.get("region") or locals().get("main_region") or ""),
+                "entry_city": str(entry_geo.get("city") or ""),
+                "payment_proxy_country": str(options.get("payment_proxy_country") or payment_geo.get("country") or locals().get("payment_country") or "").upper(),
+                "payment_ip": str(payment_geo.get("ip") or ""),
+                "payment_region": str(payment_geo.get("region") or locals().get("payment_region") or ""),
+                "payment_city": str(payment_geo.get("city") or ""),
                 "oaics_retry_count": options.get("_oaics_retry_count", 0),
                 "oaics_retry_success": bool(
                     options.get("_oaics_retry_count", 0) > 0 and is_stripe_checkout_session_id(session_id)
                 ),
+                "oaics_payment_method_types": list(options.get("_oaics_payment_methods") or []),
+                "oaics_paypal_available": "paypal" in (options.get("_oaics_payment_methods") or []),
             }
             if promo_requested:
                 checkout_trial = checkout_data.get("one_click_trial_eligible")
@@ -1813,17 +2077,7 @@ class JobStore:
                 self.update(job_id, percent=56, text="正在检测官方长链金额")
                 if not session_id:
                     if promo_requested:
-            has_oaics_session = bool(
-                is_openai_checkout_session_id(session_id)
-                or is_openai_checkout_session_id(checkout_data.get("openai_checkout_session_id"))
-            )
-            oaics_payment_methods = (
-                extract_checkout_payment_methods(checkout_data)
-                if has_oaics_session
-                else []
-            )
-            options["_oaics_payment_methods"] = oaics_payment_methods
-                        raise RuntimeError("官方长链未返回 Stripe Session ID，优惠金额校验失败")
+                        raise sc.PromoNotAppliedError("官方长链未返回 Stripe Session ID，优惠金额校验失败")
                     self.update(job_id, percent=100, text="支付长链生成完成", status="done", result=result)
                     return
 
@@ -1868,16 +2122,6 @@ class JobStore:
                             hosted_zero = int(str(hosted_amount)) == 0
                         except (TypeError, ValueError):
                             hosted_zero = str(hosted_amount).strip() in {"0", "0.0", "0.00"}
-                for method in extract_checkout_payment_methods(materialized):
-                    if method not in oaics_payment_methods:
-                        oaics_payment_methods.append(method)
-                options["_oaics_payment_methods"] = oaics_payment_methods
-                self.log(
-                    job_id,
-                    "OAICS ???????????"
-                    f"{oaics_payment_methods or ['???']}?"
-                    f"PayPal={'??' if 'paypal' in oaics_payment_methods else '???'}",
-                )
                         if hosted_zero:
                             break
 
@@ -1889,11 +2133,6 @@ class JobStore:
                     hosted_version,
                     hosted_ctx,
                     hosted_billing,
-                    # An OAICS response may advertise PayPal without exposing
-                    # a Stripe payment_page.  Do not invent a private
-                    # custom_payment_method/start request from that capability
-                    # flag; keep the browser-backed fallback until a verified
-                    # request/response contract is available.
                     hosted_profile,
                     lambda m: self.log(job_id, m),
                 )
@@ -1910,7 +2149,7 @@ class JobStore:
                     "stripe_publishable_key": hosted_pk,
                 })
                 if promo_requested and not hosted_zero:
-                    raise RuntimeError(f"官方长链优惠未生效：Stripe 今日应付 amount={hosted_amount}")
+                    raise sc.PromoNotAppliedError(f"官方长链优惠未生效：Stripe 今日应付 amount={hosted_amount}")
                 if promo_requested:
                     self.log(job_id, "官方长链金额校验通过：Stripe 今日应付 amount=0")
                 else:
@@ -1925,13 +2164,24 @@ class JobStore:
             billing_geo = None
             if provider == "paypal" and str(options.get("payment_proxy_country") or "").upper() == country:
                 billing_geo = payment_geo
+            selected_paypal_profile = (
+                options.get("paypal_billing_profile") or None
+                if provider == "paypal" else None
+            )
+            paypal_billing_country = (
+                str(options.get("paypal_billing_country") or country).upper()
+                if provider == "paypal" else ""
+            )
+            main_billing_profile = options.get("billing_profile") or None
+            if selected_paypal_profile and paypal_billing_country == country:
+                main_billing_profile = selected_paypal_profile
             billing = default_billing(
                 country,
                 meta.get("email") or "",
                 options.get("pix_tax_id") or "",
                 billing_geo,
                 real_random=(provider == "paypal"),
-                billing_profile=options.get("billing_profile") or None,
+                billing_profile=main_billing_profile,
                 require_profile=provider == "gopay",
             )
             if billing.get("_address_source") == "manual_profile":
@@ -1950,8 +2200,9 @@ class JobStore:
                 selected_address = billing.get("address") or {}
                 self.log(
                     job_id,
-                    "PayPal 本轮随机真实账单：source={}，城市={}，邮编={}，地点={}".format(
+                    "PayPal 本轮 OpenAI 账单：source={}，国家={}，城市={}，邮编={}，地点={}".format(
                         billing.get("_address_source") or "unknown",
+                        selected_address.get("country") or country,
                         selected_address.get("city") or "-",
                         selected_address.get("postal_code") or "-",
                         billing.get("_place_name") or "公开场所",
@@ -1959,35 +2210,37 @@ class JobStore:
                 )
             paypal_payment_billing = None
             if provider == "paypal":
-                paypal_country = str(options.get("payment_proxy_country") or country).upper()
-                if paypal_country != country:
-                    # 检查是否因白名单回退导致国家不一致
-                    direct_countries = {str(item).upper() for item in getattr(sc, "PAYPAL_ORDER_COUNTRIES", [])}
-                    if paypal_country not in direct_countries and country == "DE":
-                        # 代理国家不在白名单，已回退到 DE，统一使用 DE 账单
+                paypal_proxy_country = str(
+                    options.get("payment_proxy_country") or country
+                ).upper()
+                if paypal_billing_country == country:
+                    if paypal_proxy_country != country:
                         self.log(
                             job_id,
-                            f"PayPal 账单统一：代理国家 {paypal_country} 未在白名单，"
-                            f"统一使用回退国家 {country} 避免账单冲突",
+                            f"PayPal 账单统一：代理出口={paypal_proxy_country}，"
+                            f"最终 Checkout/PayPal={country}；使用 {paypal_billing_country} 完整账单地址",
                         )
-                        # 不创建分离账单，paypal_payment_billing 保持 None
-                    else:
-                        # 正常分离账单场景（两个国家都在白名单内）
-                        paypal_payment_billing = default_billing(
-                            paypal_country,
-                            meta.get("email") or "",
-                            geo=payment_geo,
-                            real_random=True,
-                        )
-                        paypal_address = paypal_payment_billing.get("address") or {}
-                "oaics_payment_method_types": list(options.get("_oaics_payment_methods") or []),
-                "oaics_paypal_available": "paypal" in (options.get("_oaics_payment_methods") or []),
-                        self.log(
-                            job_id,
-                            f"PayPal separated billing: OpenAI={country}/{options.get('currency')}, "
-                            f"PayPal={paypal_country}, city={paypal_address.get('city') or '-'}, "
-                            f"postal={paypal_address.get('postal_code') or '-'}",
-                        )
+                else:
+                    # Only create a separate PaymentMethod billing object when
+                    # the final PayPal billing country really differs from the
+                    # OpenAI Checkout country.  A missing profile means auto
+                    # selection; never pass {} into default_billing().
+                    paypal_payment_billing = default_billing(
+                        paypal_billing_country,
+                        meta.get("email") or "",
+                        geo=payment_geo,
+                        real_random=True,
+                        billing_profile=selected_paypal_profile,
+                    )
+                    paypal_address = paypal_payment_billing.get("address") or {}
+                    self.log(
+                        job_id,
+                        f"PayPal separated billing: OpenAI={country}/{options.get('currency')}, "
+                        f"PayPal={paypal_billing_country}, proxy={paypal_proxy_country}, "
+                        f"source={paypal_payment_billing.get('_address_source') or 'unknown'}, "
+                        f"city={paypal_address.get('city') or '-'}, "
+                        f"postal={paypal_address.get('postal_code') or '-'}",
+                    )
             promotion_billing = None
             if provider == "paypal" and promo_requested:
                 promotion_country = str(main_country or "BR").upper()
@@ -2135,10 +2388,12 @@ class JobStore:
                     import datetime
                     success_info = []
                     if entry_proxy:
-                        promo_country, promo_region = proxy_country(entry_proxy)
+                        promo_country = entry_geo.get("country") or ""
+                        promo_region = entry_geo.get("region") or ""
                         success_info.append(f"代理池1（优惠更新）={promo_country}/{promo_region}")
                     if exit_proxy:
-                        payment_country, payment_region = proxy_country(exit_proxy)
+                        payment_country = payment_geo.get("country") or ""
+                        payment_region = payment_geo.get("region") or ""
                         success_info.append(f"代理池2（支付）={payment_country}/{payment_region}")
                     success_info.append(f"时间={datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     success_info.append(f"尝试次数={attempt}")
@@ -2171,6 +2426,15 @@ class JobStore:
                     status="error",
                     percent=100,
                     text="Checkout 接口协议已变化，已停止重复重试",
+                    error=error_text[:1200],
+                    error_code=error_code,
+                )
+            elif error_code == PROMO_NOT_APPLIED_ERROR_CODE:
+                self.update(
+                    job_id,
+                    status="error",
+                    percent=100,
+                    text="优惠未生效，已停止重试",
                     error=error_text[:1200],
                     error_code=error_code,
                 )
@@ -2227,6 +2491,440 @@ def security_headers(resp):
     return resp
 
 
+def manage_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not MANAGE_PASSWORD:
+            return jsonify({"error": "管理中心尚未启用，请设置 PAY153_MANAGE_PASSWORD"}), 503
+        if not session.get("manage_authenticated"):
+            return jsonify({"error": "需要先登录管理中心"}), 401
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _manage_payload() -> dict[str, Any]:
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _safe_log_message(value: str) -> str:
+    value = re.sub(r"(?i)(bearer\s+)[^\s]+", r"\1[TOKEN]", str(value or ""))
+    return re.sub(r"eyJ[A-Za-z0-9_.-]{40,}", "[TOKEN]", value)
+
+
+_PUBLIC_ADDRESS_ID_FIELDS = (
+    "country", "name", "line1", "city", "state", "postal_code",
+)
+
+
+def _public_address_id(address: dict[str, Any]) -> str:
+    canonical = "\x1f".join(
+        str(address.get(field) or "").strip()
+        for field in _PUBLIC_ADDRESS_ID_FIELDS
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:20]
+
+
+def _builtin_public_address_items(country: str = "") -> list[dict[str, Any]]:
+    from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
+
+    wanted_country = str(country or "").strip().upper()
+    rows: list[dict[str, Any]] = []
+    countries = [wanted_country] if wanted_country else sorted(_BUILTIN_PUBLIC_ADDRESSES)
+    for country_code in countries:
+        for raw in _BUILTIN_PUBLIC_ADDRESSES.get(country_code, []):
+            item = dict(raw)
+            item["country"] = str(item.get("country") or country_code).upper()
+            item["id"] = _public_address_id(item)
+            rows.append(item)
+    return rows
+
+
+def _find_builtin_public_address(address_id: str) -> dict[str, Any]:
+    address_id = str(address_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{20}", address_id):
+        return {}
+    return next(
+        (item for item in _builtin_public_address_items() if item["id"] == address_id),
+        {},
+    )
+
+
+def _paypal_billing_country_options(
+    manual_profiles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
+
+    manual_counts: dict[str, int] = defaultdict(int)
+    for item in manual_profiles:
+        country = str(item.get("country") or "").strip().upper()
+        if country:
+            manual_counts[country] += 1
+    countries = sorted(set(_BUILTIN_PUBLIC_ADDRESSES) | set(manual_counts))
+    return [
+        {
+            "country": country,
+            "builtin_count": len(_BUILTIN_PUBLIC_ADDRESSES.get(country, [])),
+            "manual_count": manual_counts.get(country, 0),
+        }
+        for country in countries
+    ]
+
+
+def _resolve_paypal_billing_selection(
+    raw_selection: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    kind = str(raw_selection.get("kind") or "").strip().lower()
+    requested_country = str(raw_selection.get("country") or "").strip().upper()
+
+    if kind == "manage_profile":
+        try:
+            profile_id = int(raw_selection.get("id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("所选 Manage 账单档案 ID 不正确") from exc
+        item = MANAGE_STORE.get_billing_profile(profile_id, reveal=True)
+        if not item:
+            raise ValueError("所选 Manage 账单档案不存在")
+        country = str(item.get("country") or "").strip().upper()
+        profile = dict(item.get("profile") or {})
+        profile["country"] = country
+        selection_id: int | str = profile_id
+    elif kind == "builtin_address":
+        item = _find_builtin_public_address(str(raw_selection.get("id") or ""))
+        if not item:
+            raise ValueError("所选内置公共地址不存在或已更新")
+        country = str(item.get("country") or "").strip().upper()
+        profile = {
+            "name": item.get("name") or "",
+            "email": "",
+            "line1": item.get("line1") or "",
+            "line2": item.get("line2") or "",
+            "city": item.get("city") or "",
+            "state": item.get("state") or "",
+            "postal_code": item.get("postal_code") or "",
+            "country": country,
+        }
+        selection_id = item["id"]
+    else:
+        raise ValueError("PayPal 账单地址来源不正确")
+
+    if requested_country and requested_country != country:
+        raise ValueError(
+            f"所选地址国家 {country or '未知'} 与下拉国家 {requested_country} 不一致"
+        )
+    if not re.fullmatch(r"[A-Z]{2}", country):
+        raise ValueError("所选 Manage 账单档案缺少有效国家代码")
+    normalized = normalize_billing_profile(profile, country, require_complete=True)
+    return normalized, {
+        "kind": kind,
+        "id": selection_id,
+        "country": country,
+    }
+
+
+@app.get("/manage")
+def manage_page():
+    return send_from_directory(app.static_folder, "manage.html")
+
+
+@app.get("/api/manage/session")
+def manage_session():
+    return jsonify({
+        "configured": bool(MANAGE_PASSWORD),
+        "authenticated": bool(session.get("manage_authenticated")),
+        "path": "/manage",
+    })
+
+
+@app.post("/api/manage/login")
+def manage_login():
+    if not MANAGE_PASSWORD:
+        return jsonify({"error": "管理中心尚未启用，请设置 PAY153_MANAGE_PASSWORD"}), 503
+    password = str(_manage_payload().get("password") or "")
+    if not secrets.compare_digest(password, MANAGE_PASSWORD):
+        session.pop("manage_authenticated", None)
+        return jsonify({"error": "管理密码不正确"}), 401
+    session["manage_authenticated"] = True
+    session["manage_login_at"] = int(time.time())
+    return jsonify({"ok": True})
+
+
+@app.post("/api/manage/logout")
+def manage_logout():
+    session.pop("manage_authenticated", None)
+    session.pop("manage_login_at", None)
+    return jsonify({"ok": True})
+
+
+@app.get("/api/manage/summary")
+@manage_required
+def manage_summary():
+    return jsonify(MANAGE_STORE.summary())
+
+
+@app.route("/api/manage/proxy-pools", methods=["GET", "POST"])
+@manage_required
+def manage_proxy_pools():
+    if request.method == "GET":
+        return jsonify({"items": MANAGE_STORE.list_proxy_pools(request.args.get("country", ""), request.args.get("rail", ""))})
+    payload = _manage_payload()
+    try:
+        proxies = normalize_proxy_pool(payload.get("proxies") or payload.get("proxy_data") or "", "代理池")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not proxies:
+        return jsonify({"error": "代理池至少需要一条代理"}), 400
+    payload["proxies"] = proxies
+    try:
+        return jsonify({"item": MANAGE_STORE.upsert_proxy_pool(payload)}), 201
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/manage/proxy-pools/<int:pool_id>", methods=["GET", "PUT", "DELETE"])
+@manage_required
+def manage_proxy_pool_detail(pool_id: int):
+    if request.method == "GET":
+        item = MANAGE_STORE.get_proxy_pool(pool_id, reveal=request.args.get("reveal") == "1")
+        return jsonify(item) if item else (jsonify({"error": "代理池不存在"}), 404)
+    if request.method == "DELETE":
+        return jsonify({"ok": MANAGE_STORE.delete_proxy_pool(pool_id)})
+    payload = _manage_payload()
+    payload["id"] = pool_id
+    existing = MANAGE_STORE.get_proxy_pool(pool_id)
+    if not existing:
+        return jsonify({"error": "代理池不存在"}), 404
+    payload.setdefault("external_key", existing.get("external_key", ""))
+    try:
+        payload["proxies"] = normalize_proxy_pool(payload.get("proxies") or payload.get("proxy_data") or "", "代理池")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not payload["proxies"]:
+        return jsonify({"error": "代理池至少需要一条代理"}), 400
+    item = MANAGE_STORE.upsert_proxy_pool(payload)
+    return jsonify({"item": item}) if item else (jsonify({"error": "代理池不存在"}), 404)
+
+
+@app.route("/api/manage/billing-profiles", methods=["GET", "POST"])
+@manage_required
+def manage_billing_profiles():
+    if request.method == "GET":
+        country = request.args.get("country", "")
+        return jsonify({
+            "items": MANAGE_STORE.list_billing_profiles(country, request.args.get("rail", "")),
+        })
+    payload = _manage_payload()
+    try:
+        return jsonify({"item": MANAGE_STORE.upsert_billing_profile(payload)}), 201
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+
+@app.route("/api/manage/billing-profiles/<int:profile_id>", methods=["GET", "PUT", "DELETE"])
+@manage_required
+def manage_billing_profile_detail(profile_id: int):
+    if request.method == "GET":
+        item = MANAGE_STORE.get_billing_profile(profile_id, reveal=request.args.get("reveal") == "1")
+        return jsonify(item) if item else (jsonify({"error": "账单档案不存在"}), 404)
+    if request.method == "DELETE":
+        return jsonify({"ok": MANAGE_STORE.delete_billing_profile(profile_id)})
+    payload = _manage_payload()
+    payload["id"] = profile_id
+    try:
+        existing = MANAGE_STORE.get_billing_profile(profile_id, reveal=True)
+        if not existing:
+            return jsonify({"error": "账单档案不存在"}), 404
+        return jsonify({"item": MANAGE_STORE.upsert_billing_profile(payload)})
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.get("/api/manage/paypal-billing-options")
+@manage_required
+def manage_paypal_billing_options():
+    country = str(request.args.get("country") or "").strip().upper()
+    if country and not re.fullmatch(r"[A-Z]{2}", country):
+        return jsonify({"error": "国家/地区需要使用两位国家代码"}), 400
+
+    all_manual_profiles = MANAGE_STORE.list_billing_profiles()
+    manual_profiles = [
+        item for item in all_manual_profiles
+        if country and str(item.get("country") or "").upper() == country
+    ]
+    return jsonify({
+        "country": country,
+        "countries": _paypal_billing_country_options(all_manual_profiles),
+        "manual_profiles": manual_profiles,
+        "builtin_addresses": _builtin_public_address_items(country) if country else [],
+    })
+
+
+@app.route("/api/manage/asn-recommendations", methods=["GET", "PUT"])
+@manage_required
+def manage_asn_recommendations():
+    if request.method == "GET":
+        return jsonify({"items": MANAGE_STORE.list_asn_recommendations(request.args.get("country", ""))})
+    payload = _manage_payload()
+    try:
+        return jsonify({"item": MANAGE_STORE.upsert_asn_recommendation(payload)})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/manage/builtin-addresses", methods=["GET"])
+@manage_required
+def manage_builtin_addresses():
+    """获取内置公共地址库"""
+    country = request.args.get("country", "").upper()
+    address_type = request.args.get("type", "").lower()
+    all_addresses = _builtin_public_address_items()
+    library_total = len(all_addresses)
+    addresses = _builtin_public_address_items(country) if country else all_addresses
+
+    # 按地址类型筛选
+    if address_type:
+        addresses = [addr for addr in addresses if addr.get("type", "") == address_type]
+
+    # 统计信息
+    countries = sorted({address.get("country", "") for address in all_addresses if address.get("country")})
+    type_counts = {}
+    for addr in addresses:
+        addr_type = addr.get("type", "unknown")
+        type_counts[addr_type] = type_counts.get(addr_type, 0) + 1
+
+    return jsonify({
+        "success": True,
+        "addresses": addresses,
+        "total": len(addresses),
+        "library_total": library_total,
+        "countries": countries,
+        "type_counts": type_counts,
+    })
+
+
+@app.get("/api/manage/success-records")
+@manage_required
+def manage_success_records():
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    items = MANAGE_STORE.list_success_records(
+        limit=limit,
+        country=request.args.get("country", ""),
+        link_type=request.args.get("link_type", ""),
+        query=request.args.get("q", ""),
+    )
+    return jsonify({"items": items})
+
+
+@app.get("/api/manage/logs")
+@manage_required
+def manage_logs():
+    day = str(request.args.get("day") or time.strftime("%Y-%m-%d"))[:10]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        return jsonify({"error": "日志日期格式应为 YYYY-MM-DD"}), 400
+    job_id = str(request.args.get("job_id") or "").strip()[:120]
+    query = str(request.args.get("q") or "").strip().lower()[:160]
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", "200"))))
+    except ValueError:
+        limit = 200
+    directory = BACKEND_LOG_DIR / day
+    if job_id and not re.fullmatch(r"[A-Za-z0-9._-]+", job_id):
+        return jsonify({"error": "Job ID 格式不正确"}), 400
+    paths = [directory / f"{job_id}.log"] if job_id else sorted(directory.glob("*.log"), reverse=True)
+    line_re = re.compile(r"^(?P<time>[^ ]+ [^ ]+) \[(?P<kind>[^]]+)\] (?P<message>.*)$")
+    items: list[dict[str, str]] = []
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            match = line_re.match(line)
+            if match:
+                item = {
+                    "time": match.group("time"),
+                    "kind": match.group("kind"),
+                    "job_id": path.stem,
+                    "message": _safe_log_message(match.group("message")),
+                }
+            else:
+                item = {"time": "", "kind": "LOG", "job_id": path.stem, "message": _safe_log_message(line)}
+            if query and query not in json.dumps(item, ensure_ascii=False).lower():
+                continue
+            items.append(item)
+    items.sort(key=lambda item: (item.get("time") or "", item.get("job_id") or ""), reverse=True)
+    items = items[:limit]
+    return jsonify({"day": day, "items": items})
+
+
+@app.post("/api/manage/import-local")
+@manage_required
+def manage_import_local():
+    payload = _manage_payload()
+    imported = {"proxy_pools": 0, "billing_profiles": 0, "asn_regions": 0}
+
+    proxy_config = payload.get("proxy_profiles")
+    if isinstance(proxy_config, dict):
+        proxy_groups: list[tuple[str, dict[str, Any]]] = []
+        default = proxy_config.get("default")
+        if isinstance(default, dict):
+            proxy_groups.append(("default", default))
+        profiles = proxy_config.get("profiles")
+        if isinstance(profiles, dict):
+            proxy_groups.extend((str(rail), value) for rail, value in profiles.items() if isinstance(value, dict))
+        for rail, group in proxy_groups:
+            for pool_kind in ("entry", "exit"):
+                raw = group.get(pool_kind)
+                if not raw:
+                    continue
+                try:
+                    proxies = normalize_proxy_pool(raw, f"{rail} {pool_kind}")
+                except ValueError:
+                    continue
+                if not proxies:
+                    continue
+                MANAGE_STORE.upsert_proxy_pool({
+                    "external_key": f"browser:{rail}:{pool_kind}",
+                    "name": f"{rail} · {pool_kind}",
+                    "rail": "shared" if rail == "default" else rail,
+                    "pool_kind": pool_kind,
+                    "proxies": proxies,
+                    "enabled": True,
+                })
+                imported["proxy_pools"] += 1
+
+    billing_config = payload.get("billing_profiles")
+    if isinstance(billing_config, dict) and isinstance(billing_config.get("profiles"), dict):
+        for profile_key, profile in billing_config["profiles"].items():
+            if not isinstance(profile, dict):
+                continue
+            parts = str(profile_key).split(":", 1)
+            MANAGE_STORE.upsert_billing_profile({
+                **profile,
+                "profile_key": str(profile_key),
+                "rail": parts[0],
+                "country": parts[1] if len(parts) > 1 else profile.get("country", ""),
+                "source": "browser-local",
+            })
+            imported["billing_profiles"] += 1
+
+    asn_config = payload.get("asn_recommendations")
+    if isinstance(asn_config, dict) and isinstance(asn_config.get("regions"), dict):
+        for country, recommendation in asn_config["regions"].items():
+            if not isinstance(recommendation, dict):
+                continue
+            try:
+                MANAGE_STORE.upsert_asn_recommendation({"country": country, **recommendation})
+                imported["asn_regions"] += 1
+            except ValueError:
+                continue
+    return jsonify({"ok": True, "imported": imported})
+
+
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -2264,6 +2962,11 @@ def config():
             "queue_enabled": True,
             "workers": STORE.worker_limit,
         },
+        "manage": {
+            "enabled": bool(MANAGE_PASSWORD),
+            "path": "/manage",
+            "storage": "sqlite",
+        },
     })
 
 
@@ -2279,16 +2982,32 @@ def proxy_probe():
         return jsonify({"error": f"{pool_label}至少填写 1 条代理"}), 400
 
     selected = secrets.choice(proxies)
-    try:
-        identity = probe_proxy_identity(selected)
-    except Exception as exc:
+    candidates = [selected]
+    rest = [proxy for proxy in proxies if proxy != selected]
+    random.SystemRandom().shuffle(rest)
+    candidates.extend(rest[:2])
+    identity: dict[str, str] | None = None
+    last_error: Exception | None = None
+    attempts = 0
+    for candidate in candidates:
+        attempts += 1
+        try:
+            identity = probe_proxy_identity(candidate)
+            selected = candidate
+            break
+        except Exception as exc:
+            last_error = exc
+    if identity is None:
+        error_type = type(last_error).__name__ if last_error else "RuntimeError"
         return jsonify({
-            "error": f"{pool_label}随机检测失败：{type(exc).__name__}",
+            "error": f"{pool_label}随机检测失败：{error_type}",
+            "attempts": attempts,
         }), 502
     return jsonify({
         "ok": True,
         "pool": pool_label,
         "pool_size": len(proxies),
+        "attempts": attempts,
         "selected_index": proxies.index(selected) + 1,
         **identity,
     })
@@ -2350,6 +3069,28 @@ def start_checkout():
         pix_identity.update({key: value for key, value in manual_identity.items() if value})
     if link_type == "gopay" and country != "ID":
         return jsonify({"error": "Gopay Checkout 国家必须为 ID/印尼"}), 400
+
+    paypal_billing_profile: dict[str, str] = {}
+    paypal_billing_selection: dict[str, Any] = {}
+    raw_billing_selection = data.get("billing_selection")
+    if raw_billing_selection is not None and not isinstance(raw_billing_selection, dict):
+        return jsonify({"error": "PayPal 账单地址选择参数不正确"}), 400
+    selection_kind = str(
+        (raw_billing_selection or {}).get("kind") or ""
+    ).strip().lower()
+    if selection_kind not in {"", "auto"}:
+        if link_type != "paypal":
+            return jsonify({"error": "Manage 账单地址选择仅用于 PayPal"}), 400
+        if not MANAGE_PASSWORD:
+            return jsonify({"error": "管理中心尚未启用，请设置 PAY153_MANAGE_PASSWORD"}), 503
+        if not session.get("manage_authenticated"):
+            return jsonify({"error": "需要先登录管理中心才能使用所选账单地址"}), 401
+        try:
+            paypal_billing_profile, paypal_billing_selection = (
+                _resolve_paypal_billing_selection(raw_billing_selection or {})
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
     try:
         billing_profile = normalize_billing_profile(
             data.get("billing_profile"),
@@ -2383,6 +3124,8 @@ def start_checkout():
             if str(data.get("pix_auto_kind") or "cpf").lower() in {"mixed", "cpf", "cnpj"} else "cpf",
         "pix_identity": pix_identity,
         "billing_profile": billing_profile,
+        "paypal_billing_profile": paypal_billing_profile,
+        "paypal_billing_selection": paypal_billing_selection,
         "retry_count": retry_count,
     }
     if not options["token_raw"].strip():

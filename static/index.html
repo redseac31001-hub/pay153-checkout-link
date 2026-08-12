@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 多通道提链控制台</title>
   <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Gopay、Team 与 Codex 空间提链工作台">
-  <link rel="stylesheet" href="/static/styles.css?v=20260810-billing01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260812-risk-freeze01">
 </head>
 <body>
   <div class="paper-noise"></div>
@@ -17,6 +17,7 @@
     </a>
     <div class="top-actions">
       <a class="protocol-nav-link" href="/paypal-pay/">PayPal 协议支付</a>
+      <a class="protocol-nav-link manage-nav-link" href="/manage">管理中心</a>
       <span class="service-dot"><i></i> 服务在线</span>
       <button id="themeToggle" class="icon-button" type="button" aria-label="切换主题">◐</button>
     </div>
@@ -47,33 +48,55 @@
         </div>
         <div class="public-limit-note"><b>公共服务限制</b><span>全站每分钟处理 20 个新任务，超出后自动排队；同一 IP 每分钟最多创建 3 个任务。</span></div>
 
-        <label class="field token-field">
-          <span class="label-row"><b>Access Token / Session JSON</b><small id="tokenHint">自动识别账号信息</small></span>
-          <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="粘贴 Access Token，或 chatgpt.com/api/auth/session 返回的 JSON"></textarea>
-          <span class="field-note">内容不写入数据库，服务日志会自动隐藏 Token。</span>
-        </label>
-
-        <fieldset class="field-group">
-          <legend>订阅 / 空间</legend>
-          <div class="choice-grid plan-grid" id="planGrid">
-            <label class="choice active"><input type="radio" name="plan" value="plus" checked><span><b>Plus</b><small>个人订阅</small></span></label>
-            <label class="choice"><input type="radio" name="plan" value="pro"><span><b>Pro</b><small>专业计划</small></span></label>
-            <label class="choice"><input type="radio" name="plan" value="team"><span><b>Team</b><small>工作空间</small></span></label>
-            <label class="choice"><input type="radio" name="plan" value="codex_low"><span><b>Codex</b><small>低价空间</small></span></label>
+          <div class="field token-field account-manager">
+            <span class="label-row"><b>Access Token / Session JSON</b><small id="tokenHint">自动识别账号信息 · 本机保存</small></span>
+            <div class="account-toolbar">
+              <button id="accountImportPaste" type="button" class="account-import-btn">导入粘贴内容</button>
+              <label class="account-import-btn" for="accountFileInput">导入 AT 文件</label>
+              <input id="accountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
+              <button id="accountSelectAll" type="button" class="ghost-button account-toolbar-btn" disabled>全选可用</button>
+              <button id="accountBatchRun" type="button" class="account-batch-button" disabled>并发提链（0）</button>
+              <button id="accountClearAll" type="button" class="ghost-button account-toolbar-btn">清空列表</button>
+              <span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span>
+            </div>
+            <div id="accountList" class="account-list" hidden></div>
+            <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="可直接粘贴一个 AT 提交；或粘贴多个 AT 后点“导入粘贴内容”"></textarea>
+            <span class="field-note">支持直接粘贴单个 Access Token / Session JSON；点击“导入粘贴内容”可把一行一个 AT 的多账号文本写入本机账号列表。账号列表保存在本机浏览器 localStorage，不上传业务服务器；连续 3 次 PayPal 风控拒绝将为该账号本机冷却约 60 分钟，连续 3 次明确账号 block 将进入本机冻结。</span>
           </div>
-        </fieldset>
 
-        <fieldset class="field-group">
-          <legend>支付路径</legend>
-          <div class="choice-grid rail-grid" id="railGrid">
-            <label class="rail active"><input type="radio" name="link_type" value="hosted" checked><span class="rail-icon">↗</span><span><b>Hosted</b><small>官方支付长链</small></span></label>
-            <label class="rail"><input type="radio" name="link_type" value="paypal"><span class="rail-icon">P</span><span><b>PayPal</b><small>Approve 跳转</small></span></label>
-            <label class="rail"><input type="radio" name="link_type" value="ideal"><span class="rail-icon">iD</span><span><b>iDEAL</b><small>荷兰银行支付</small></span></label>
-            <label class="rail"><input type="radio" name="link_type" value="upi"><span class="rail-icon">₹</span><span><b>UPI</b><small>印度二维码</small></span></label>
-            <label class="rail"><input type="radio" name="link_type" value="pix"><span class="rail-icon">◇</span><span><b>PIX</b><small>巴西即时支付</small></span></label>
-            <label class="rail"><input type="radio" name="link_type" value="gopay"><span class="rail-icon">G</span><span><b>Gopay</b><small>印尼电子钱包</small></span></label>
+        <details class="field-group collapsible-group" id="planSection" open>
+          <summary class="collapsible-summary">
+            <span class="collapsible-title"><b>订阅 / 空间</b><small>选择个人订阅或工作空间方案</small></span>
+            <span id="planSelection" class="collapsible-selection">Plus</span>
+            <span class="collapsible-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="collapsible-body">
+            <div class="choice-grid plan-grid" id="planGrid">
+              <label class="choice active"><input type="radio" name="plan" value="plus" checked><span><b>Plus</b><small>个人订阅</small></span></label>
+              <label class="choice"><input type="radio" name="plan" value="pro"><span><b>Pro</b><small>专业计划</small></span></label>
+              <label class="choice"><input type="radio" name="plan" value="team"><span><b>Team</b><small>工作空间</small></span></label>
+              <label class="choice"><input type="radio" name="plan" value="codex_low"><span><b>Codex</b><small>低价空间</small></span></label>
+            </div>
           </div>
-        </fieldset>
+        </details>
+
+        <details class="field-group collapsible-group" id="railSection" open>
+          <summary class="collapsible-summary">
+            <span class="collapsible-title"><b>支付路径</b><small>选择要生成的支付通道</small></span>
+            <span id="railSelection" class="collapsible-selection">Hosted</span>
+            <span class="collapsible-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <div class="collapsible-body">
+            <div class="choice-grid rail-grid" id="railGrid">
+              <label class="rail active"><input type="radio" name="link_type" value="hosted" checked><span class="rail-icon">↗</span><span><b>Hosted</b><small>官方支付长链</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="paypal"><span class="rail-icon">P</span><span><b>PayPal</b><small>Approve 跳转</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="ideal"><span class="rail-icon">iD</span><span><b>iDEAL</b><small>荷兰银行支付</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="upi"><span class="rail-icon">₹</span><span><b>UPI</b><small>印度二维码</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="pix"><span class="rail-icon">◇</span><span><b>PIX</b><small>巴西即时支付</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="gopay"><span class="rail-icon">G</span><span><b>Gopay</b><small>印尼电子钱包</small></span></label>
+            </div>
+          </div>
+        </details>
 
         <div class="two-cols" id="regionFields">
           <label class="field"><span>国家 / 地区</span><select id="country">
@@ -182,7 +205,28 @@
         </div>
 
         <div id="paypalOptions" class="conditional-fields compact-fields" hidden>
-          <p class="inline-note">巴西 PayPal 推荐：代理池 1、代理池 2 均使用 BR。系统自动创建 DE/EUR OpenAI 账单，并使用 BR 资料完成 PayPal PM、confirm 与 poll；其他国家仍按代理池 2 自动识别。</p>
+          <div class="paypal-billing-heading">
+            <div><b>PayPal 账单地址</b><small>默认自动随机，也可以精确选择 Manage 中的手工档案或内置公共地址。</small></div>
+            <a href="/manage" target="_blank" rel="noopener">Manage 地址库 ↗</a>
+          </div>
+          <div class="paypal-billing-grid">
+            <label class="field"><span>地址来源</span><select id="paypalBillingSource">
+              <option value="auto" selected>自动随机（默认）</option>
+              <option value="manage_profile">Manage 手工档案</option>
+              <option value="builtin_address">内置公共地址库</option>
+            </select></label>
+            <label class="field"><span>地址国家</span><select id="paypalBillingCountry" disabled>
+              <option value="">选择指定来源后读取</option>
+            </select></label>
+            <label class="field paypal-address-field"><span>具体账单地址</span><select id="paypalBillingAddress" disabled>
+              <option value="">自动模式无需选择</option>
+            </select></label>
+          </div>
+          <div class="paypal-billing-status-row">
+            <p id="paypalBillingStatus" class="paypal-billing-status" aria-live="polite">自动模式：任务将根据实际 PayPal 账单国家随机选择地址。</p>
+            <button id="paypalBillingReload" type="button">重新读取</button>
+          </div>
+          <p class="inline-note">代理池 2 决定实际 PayPal 账单国家。BR、TH、JP、AU 现在支持本地地区与币种；其他非直连地区会回退 DE/EUR，此时请选择 DE 地址。</p>
         </div>
 
         <div id="pixOptions" class="conditional-fields compact-fields" hidden>
@@ -221,11 +265,18 @@
           <label class="field result-link"><span>最终链接 / 付款码</span><textarea id="resultValue" readonly></textarea></label>
           <div class="result-actions"><a id="openResult" class="primary-button" target="_blank" rel="noopener noreferrer">打开链接</a><button id="copyResult" class="secondary-button" type="button">复制结果</button></div>
         </section>
+
+        <section id="batchPanel" class="panel batch-panel" hidden>
+          <div class="panel-heading"><div><span class="section-index">D</span><h2>并发提链</h2></div><span id="batchBadge" class="status-badge idle">等待</span></div>
+          <div class="batch-summary"><b id="batchSummary">尚未选择批量任务</b><span>每个账号独立创建任务，结果互不覆盖。</span></div>
+          <div id="batchJobList" class="batch-job-list"></div>
+          <button id="batchCancelButton" class="secondary-button batch-cancel-button" type="button" hidden>停止全部任务</button>
+        </section>
       </aside>
     </section>
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260810-billing01"></script>
+  <script src="/static/app.js?v=20260812-risk-freeze01"></script>
 </body>
 </html>

@@ -43,6 +43,17 @@ class BillingProfileTests(unittest.TestCase):
         self.assertEqual(billing["address"]["city"], "Jakarta")
         self.assertEqual(billing["address"]["line2"], "Unit 2")
 
+    def test_empty_profile_uses_automatic_complete_address(self):
+        billing = default_billing(
+            "DE",
+            "customer@example.com",
+            billing_profile={},
+            real_random=False,
+        )
+        self.assertNotEqual(billing["_address_source"], "manual_profile")
+        self.assertTrue(billing["address"]["city"])
+        self.assertTrue(billing["address"]["postal_code"])
+
 
 if __name__ == "__main__":
     unittest.main()

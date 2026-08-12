@@ -11,10 +11,10 @@ import stripe_checkout as sc
 
 
 class ProxyChainTests(unittest.TestCase):
-    def test_pool_proxy_uses_local_pre_proxy_by_default(self):
+    def test_pool_proxy_uses_local_socks_pre_proxy(self):
         with patch.dict(
             os.environ,
-            {sc.PROXY_PRE_PROXY_ENV: "http://127.0.0.1:9697"},
+            {sc.PROXY_PRE_PROXY_ENV: "socks5://127.0.0.1:9697"},
             clear=False,
         ):
             http = sc.build_http("http://pool.example:8080")
@@ -28,7 +28,11 @@ class ProxyChainTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     http.curl_options.get(CurlOpt.PRE_PROXY),
-                    "socks5h://127.0.0.1:9697",
+                    "socks5://127.0.0.1:9697",
+                )
+                self.assertEqual(
+                    http.curl_options.get(CurlOpt.PROXYHEADER),
+                    [b"Host: pool.example"],
                 )
             finally:
                 http.close()
@@ -38,6 +42,7 @@ class ProxyChainTests(unittest.TestCase):
             http = sc.build_http("http://pool.example:8080")
             try:
                 self.assertNotIn(CurlOpt.PRE_PROXY, http.curl_options)
+                self.assertNotIn(CurlOpt.PROXYHEADER, http.curl_options)
                 self.assertEqual(
                     http.proxies["https"],
                     "http://pool.example:8080",
@@ -47,7 +52,16 @@ class ProxyChainTests(unittest.TestCase):
 
     def test_pre_proxy_accepts_host_port_configuration(self):
         with patch.dict(os.environ, {sc.PROXY_PRE_PROXY_ENV: "127.0.0.1:9697"}, clear=False):
-            self.assertEqual(sc.proxy_pre_proxy(), "socks5h://127.0.0.1:9697")
+            self.assertEqual(sc.proxy_pre_proxy(), "socks5://127.0.0.1:9697")
+
+    def test_http_pre_proxy_is_rejected_before_building_curl_session(self):
+        with patch.dict(
+            os.environ,
+            {sc.PROXY_PRE_PROXY_ENV: "http://127.0.0.1:9697"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "SOCKS"):
+                sc.proxy_pre_proxy()
 
     def test_http_pool_request_is_carried_through_socks_pre_proxy_to_pool(self):
         records = []
@@ -110,7 +124,7 @@ class ProxyChainTests(unittest.TestCase):
         socks_thread.start()
         try:
             pool_proxy = f"http://127.0.0.1:{pool_server.server_address[1]}"
-            pre_proxy = f"http://127.0.0.1:{socks_server.server_address[1]}"
+            pre_proxy = f"socks5h://127.0.0.1:{socks_server.server_address[1]}"
             with patch.dict(os.environ, {sc.PROXY_PRE_PROXY_ENV: pre_proxy}, clear=False):
                 http = sc.build_http(pool_proxy)
                 try:

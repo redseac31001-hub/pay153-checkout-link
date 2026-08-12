@@ -161,6 +161,87 @@ class CheckoutSessionIdTests(unittest.TestCase):
             app.CHECKOUT_SESSION_CONTRACT_ERROR_CODE,
         )
 
+    def test_promo_not_applied_stops_retry_wrapper(self):
+        class FakeStore:
+            _run_locked = app.JobStore._run_locked
+
+            def __init__(self):
+                self.attempts = 0
+                self.state = {}
+                self.updates = []
+
+            def cancelled(self, _job_id):
+                return False
+
+            def get(self, _job_id):
+                return dict(self.state)
+
+            def log(self, _job_id, _message):
+                return None
+
+            def update(self, _job_id, **fields):
+                self.updates.append(fields)
+                self.state.update(fields)
+
+            def _run_single(self, _job_id, _options):
+                self.attempts += 1
+                self.state.update({
+                    "status": "error",
+                    "error": "Plus 首月免费优惠未生效：Stripe 今日应付 amount=2000",
+                    "error_code": app.PROMO_NOT_APPLIED_ERROR_CODE,
+                })
+
+        store = FakeStore()
+        store._run_locked("job-promo", {
+            "retry_count": 5,
+            "link_type": "hosted",
+            "country": "US",
+            "entry_proxies": ["proxy-a"],
+            "exit_proxies": ["proxy-a"],
+        })
+        self.assertEqual(store.attempts, 1)
+        self.assertEqual(store.state["status"], "error")
+        self.assertEqual(store.state["error_code"], app.PROMO_NOT_APPLIED_ERROR_CODE)
+
+    def test_account_block_streak_stops_after_three_attempts(self):
+        class FakeStore:
+            _run_locked = app.JobStore._run_locked
+
+            def __init__(self):
+                self.attempts = 0
+                self.state = {}
+
+            def cancelled(self, _job_id):
+                return False
+
+            def get(self, _job_id):
+                return dict(self.state)
+
+            def log(self, _job_id, _message):
+                return None
+
+            def update(self, _job_id, **fields):
+                self.state.update(fields)
+
+            def _run_single(self, _job_id, _options):
+                self.attempts += 1
+                self.state.update({
+                    "status": "error",
+                    "error": "account blocked by policy",
+                    "error_code": "account_blocked",
+                })
+
+        store = FakeStore()
+        store._run_locked("job-block", {
+            "retry_count": 10,
+            "link_type": "hosted",
+            "country": "US",
+            "entry_proxies": ["proxy-a"],
+            "exit_proxies": ["proxy-a"],
+        })
+        self.assertEqual(store.attempts, app.ACCOUNT_BLOCK_STREAK_LIMIT)
+        self.assertEqual(store.state["error_code"], app.ACCOUNT_BLOCK_FUSE_ERROR_CODE)
+
     def test_oaics_session_uses_openai_managed_checkout_url(self):
         async def fake_sentinel(*_args, **_kwargs):
             return {}

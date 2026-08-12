@@ -11,6 +11,11 @@ let progressLastTick = 0;
 let proxySaveTimer = 0;
 let logAutoFollow = true;
 let renderedLogKey = '';
+let activeRunMode = '';
+let batchPollTimer = 0;
+let batchJobs = [];
+const batchSelectedAccountIds = new Set();
+let taskLimits = {perIp: 3, global: 20, workers: 20};
 
 const PROXY_STORAGE_KEYS = {
   profiles: 'pay153.proxy_profiles.v1',
@@ -20,6 +25,26 @@ const PROXY_STORAGE_KEYS = {
 const BILLING_STORAGE_KEY = 'pay153.billing_profiles.v1';
 const PROXY_ASN_RECOMMENDATION_STORAGE_KEY = 'pay153.proxy_asn_recommendations.v1';
 const BILLING_PROFILE_FIELDS = ['name', 'email', 'line1', 'line2', 'city', 'state', 'postal_code'];
+
+// 账号库本地持久化（私有化本机）；含冷却标记。明文 token 仅存本机浏览器。
+const ACCOUNT_STORAGE_KEY = 'pay153.accounts.v1';
+// 工程降频默认 60 分钟（非 Stripe/PayPal 官方规定时长）。
+const ACCOUNT_COOLDOWN_MS = 60 * 60 * 1000;
+const ACCOUNT_BLOCK_STREAK_LIMIT = 3;
+const ACCOUNT_BLOCK_FUSE_ERROR_CODE = 'account_blocked_fuse';
+const ACCOUNT_PAYMENT_METHOD_ALIASES = {
+  card: 'card',
+  gopay: 'gopay',
+  ideal: 'ideal',
+  paypal: 'paypal',
+  pix: 'pix',
+  upi: 'upi',
+  hosted: 'hosted'
+};
+const accountEntries = [];
+let activeAccountId = '';
+let accountIdSeq = 0;
+let accountCooldownTimer = 0;
 
 const DEFAULT_PROXY_ASN_RECOMMENDATIONS = {
   GB: {
@@ -77,6 +102,11 @@ let activeBillingProfileKey = '';
 let billingSaveTimer = 0;
 let billingInputDirty = false;
 let proxyAsnRecommendations = {};
+let paypalBillingCountries = [];
+let paypalBillingCountryPayloads = {};
+let paypalBillingCatalogLoaded = false;
+let paypalBillingCatalogPromise = null;
+let paypalBillingRevision = 0;
 
 const providerDefaults = {
   hosted: {country: 'US', currency: 'USD'}, paypal: {country: 'US', currency: 'USD'},
@@ -527,6 +557,217 @@ function billingProfileMissing(profile){
   return Object.entries(labels).filter(([field]) => !String(profile?.[field] || '').trim()).map(([, label]) => label);
 }
 
+function setPaypalBillingStatus(text, state=''){
+  const node = $('paypalBillingStatus');
+  if (!node) return;
+  node.textContent = text;
+  node.className = `paypal-billing-status${state ? ` ${state}` : ''}`;
+}
+function setPaypalBillingReloading(loading){
+  const button = $('paypalBillingReload');
+  if (!button) return;
+  button.disabled = loading;
+  button.textContent = loading ? '正在读取…' : '重新读取';
+}
+function paypalBillingSource(){
+  return $('paypalBillingSource')?.value || 'auto';
+}
+function replacePaypalSelect(select, rows, emptyLabel){
+  select.replaceChildren();
+  if (!rows.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = emptyLabel;
+    select.appendChild(option);
+    return;
+  }
+  rows.forEach(row => {
+    const option = document.createElement('option');
+    option.value = String(row.value ?? '');
+    option.textContent = row.label;
+    select.appendChild(option);
+  });
+}
+function resetPaypalBillingAddress(label='请先选择地址国家'){
+  const address = $('paypalBillingAddress');
+  if (!address) return;
+  replacePaypalSelect(address, [], label);
+  address.disabled = true;
+}
+function renderPaypalBillingCountries(){
+  const source = paypalBillingSource();
+  const countrySelect = $('paypalBillingCountry');
+  const previous = countrySelect.value;
+  if (source === 'auto') {
+    replacePaypalSelect(countrySelect, [], '自动模式无需选择');
+    countrySelect.disabled = true;
+    resetPaypalBillingAddress('自动模式无需选择');
+    return '';
+  }
+  const countKey = source === 'manage_profile' ? 'manual_count' : 'builtin_count';
+  const noun = source === 'manage_profile' ? '个手工档案' : '条内置地址';
+  const available = paypalBillingCountries
+    .filter(item => Number(item?.[countKey] || 0) > 0)
+    .map(item => ({
+      value: String(item.country || '').toUpperCase(),
+      label: `${String(item.country || '').toUpperCase()} · ${Number(item[countKey] || 0)} ${noun}`
+    }));
+  replacePaypalSelect(countrySelect, available, `Manage 中没有${noun}`);
+  if (available.some(item => item.value === previous)) countrySelect.value = previous;
+  countrySelect.disabled = !available.length;
+  resetPaypalBillingAddress(available.length ? '正在读取地址…' : `Manage 中没有${noun}`);
+  return countrySelect.value;
+}
+function paypalBillingAddressLabel(item, source){
+  if (source === 'manage_profile') {
+    return [item.profile_key || `Manage #${item.id}`, item.name_masked, item.address_masked]
+      .filter(Boolean).join(' · ');
+  }
+  return [item.name, item.line1, item.city, item.postal_code].filter(Boolean).join(' · ');
+}
+function renderPaypalBillingAddresses(payload){
+  const source = paypalBillingSource();
+  const address = $('paypalBillingAddress');
+  const previous = address.value;
+  const items = source === 'manage_profile'
+    ? (payload?.manual_profiles || [])
+    : (payload?.builtin_addresses || []);
+  const rows = items.map(item => ({
+    value: item.id,
+    label: paypalBillingAddressLabel(item, source)
+  }));
+  replacePaypalSelect(address, rows, '当前国家暂无可选地址');
+  if (rows.some(item => String(item.value) === previous)) address.value = previous;
+  address.disabled = !rows.length;
+  if (!rows.length) {
+    setPaypalBillingStatus(`${$('paypalBillingCountry').value || '当前国家'} 暂无该来源的地址。`, 'error');
+    return;
+  }
+  const sourceLabel = source === 'manage_profile' ? '手工档案' : '内置公共地址';
+  setPaypalBillingStatus(`已载入 ${rows.length} 个${sourceLabel}；提交时按 ID 由服务端重新读取。`, 'ready');
+}
+async function parsePaypalBillingResponse(response){
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+async function ensurePaypalBillingCatalog(force=false){
+  if (paypalBillingCatalogLoaded && !force) return;
+  if (paypalBillingCatalogPromise && !force) return paypalBillingCatalogPromise;
+  const promise = (async () => {
+    const response = await fetch('/api/manage/paypal-billing-options', {cache: 'no-store'});
+    const data = await parsePaypalBillingResponse(response);
+    paypalBillingCountries = Array.isArray(data.countries) ? data.countries : [];
+    paypalBillingCatalogLoaded = true;
+  })();
+  paypalBillingCatalogPromise = promise;
+  try { await promise; }
+  finally {
+    if (paypalBillingCatalogPromise === promise) paypalBillingCatalogPromise = null;
+  }
+}
+async function paypalBillingCountryPayload(country, force=false){
+  country = String(country || '').toUpperCase();
+  if (!country) return null;
+  if (paypalBillingCountryPayloads[country] && !force) {
+    return paypalBillingCountryPayloads[country];
+  }
+  const response = await fetch(
+    `/api/manage/paypal-billing-options?country=${encodeURIComponent(country)}`,
+    {cache: 'no-store'}
+  );
+  const data = await parsePaypalBillingResponse(response);
+  if (Array.isArray(data.countries)) paypalBillingCountries = data.countries;
+  paypalBillingCountryPayloads[country] = data;
+  return data;
+}
+async function refreshPaypalBillingSelector({forceCatalog=false, forceCountry=false}={}){
+  if (selected('link_type') !== 'paypal') return;
+  const revision = ++paypalBillingRevision;
+  const source = paypalBillingSource();
+  renderPaypalBillingCountries();
+  setPaypalBillingReloading(true);
+  if (source === 'auto') {
+    setPaypalBillingStatus('自动模式：正在检查 Manage 地址库连接…', 'loading');
+  } else {
+    setPaypalBillingStatus('正在读取 Manage 地址库…', 'loading');
+  }
+  try {
+    await ensurePaypalBillingCatalog(forceCatalog);
+    if (revision !== paypalBillingRevision || selected('link_type') !== 'paypal') return;
+    if (source === 'auto') {
+      renderPaypalBillingCountries();
+      setPaypalBillingStatus('自动模式：已连接 Manage；需要时可切换为指定地址。', 'ready');
+      return;
+    }
+    const country = renderPaypalBillingCountries();
+    if (!country) return;
+    const payload = await paypalBillingCountryPayload(country, forceCountry);
+    if (revision !== paypalBillingRevision || source !== paypalBillingSource()) return;
+    renderPaypalBillingAddresses(payload);
+  } catch (error) {
+    if (revision !== paypalBillingRevision) return;
+    const prefix = source === 'auto' ? '自动模式仍可使用；' : '';
+    const action = error?.status === 401
+      ? '请先在 Manage 地址库登录，然后点“重新读取”。'
+      : (error?.message || String(error));
+    $('paypalBillingCountry').disabled = true;
+    resetPaypalBillingAddress('Manage 地址库暂不可用');
+    setPaypalBillingStatus(`${prefix}${action}`, 'error');
+  } finally {
+    if (revision === paypalBillingRevision) setPaypalBillingReloading(false);
+  }
+}
+function readPaypalBillingSelection(){
+  if (selected('link_type') !== 'paypal') return null;
+  const kind = paypalBillingSource();
+  if (kind === 'auto') return null;
+  const id = $('paypalBillingAddress').value;
+  const country = $('paypalBillingCountry').value;
+  if (!id || !country) return null;
+  return {
+    kind,
+    id: kind === 'manage_profile' ? Number(id) : id,
+    country
+  };
+}
+
+const planDisplayNames = {plus:'Plus', pro:'Pro', team:'Team', codex_low:'Codex'};
+const railDisplayNames = {hosted:'Hosted', paypal:'PayPal', ideal:'iDEAL', upi:'UPI', pix:'PIX', gopay:'Gopay'};
+const COLLAPSIBLE_STORAGE_KEY = 'pay153.collapsible_sections.v1';
+
+function updateSelectionSummaries(){
+  const plan = selected('plan');
+  const rail = selected('link_type');
+  if ($('planSelection')) $('planSelection').textContent = planDisplayNames[plan] || '未选择';
+  if ($('railSelection')) $('railSelection').textContent = railDisplayNames[rail] || '未选择';
+}
+
+function initializeCollapsibleSections(){
+  const defaults = {plan: true, rail: true};
+  try{
+    const stored = JSON.parse(localStorage.getItem(COLLAPSIBLE_STORAGE_KEY) || '{}');
+    Object.keys(defaults).forEach(key => {
+      const node = $(key === 'plan' ? 'planSection' : 'railSection');
+      if (node && typeof stored[key] === 'boolean') node.open = stored[key];
+    });
+  }catch{ /* use open defaults */ }
+  Object.keys(defaults).forEach(key => {
+    const node = $(key === 'plan' ? 'planSection' : 'railSection');
+    node?.addEventListener('toggle', () => {
+      try{
+        const stored = JSON.parse(localStorage.getItem(COLLAPSIBLE_STORAGE_KEY) || '{}');
+        stored[key] = node.open;
+        localStorage.setItem(COLLAPSIBLE_STORAGE_KEY, JSON.stringify(stored));
+      }catch{ /* private preference is best effort */ }
+    });
+  });
+}
+
 function selected(name){ return form.querySelector(`input[name="${name}"]:checked`)?.value || ''; }
 function bindChoices(group, onChange){
   group.querySelectorAll('label').forEach(label => label.addEventListener('click', () => {
@@ -540,6 +781,7 @@ bindChoices($('railGrid'), () => syncFields(true));
 
 function syncFields(applyRailDefault=false){
   const plan = selected('plan'), rail = selected('link_type');
+  updateSelectionSummaries();
   if (activeProxyRail && rail !== activeProxyRail) switchProxyProfile(rail);
   $('teamFields').hidden = plan !== 'team';
   $('codexFields').hidden = plan !== 'codex_low';
@@ -576,11 +818,24 @@ function syncFields(applyRailDefault=false){
   }
   renderProxyAsnRecommendations();
   syncBillingFields();
+  if (rail === 'paypal') void refreshPaypalBillingSelector();
+  else paypalBillingRevision += 1;
 }
 $('country').addEventListener('change', () => {
   $('currency').value = countryCurrency[$('country').value] || 'USD';
   renderProxyAsnRecommendations();
   syncBillingFields();
+});
+$('paypalBillingSource').addEventListener('change', () => void refreshPaypalBillingSelector());
+$('paypalBillingCountry').addEventListener('change', () => void refreshPaypalBillingSelector());
+$('paypalBillingAddress').addEventListener('change', () => {
+  const option = $('paypalBillingAddress').selectedOptions?.[0];
+  if (option?.value) setPaypalBillingStatus(`已选择：${option.textContent}`, 'ready');
+});
+$('paypalBillingReload').addEventListener('click', () => {
+  paypalBillingCatalogLoaded = false;
+  paypalBillingCountryPayloads = {};
+  void refreshPaypalBillingSelector({forceCatalog: true, forceCountry: true});
 });
 $('usePromo').addEventListener('change', () => syncFields(false));
 $('entryProxy').addEventListener('input', () => { updateProxyCount($('entryProxy'), $('entryProxyCount')); saveProxyPools(); });
@@ -667,58 +922,946 @@ function renderLogs(logs){
   else box.scrollTop = previousTop;
 }
 function escapeHtml(v){ return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
-function setRunning(running){ $('submitButton').disabled = running; $('cancelButton').hidden = !running; }
-$('logBox').addEventListener('scroll', () => {
-  const box = $('logBox');
-  logAutoFollow = box.scrollHeight - box.clientHeight - box.scrollTop < 28;
-});
+function setRunning(running, mode=''){
+  if (running && mode) activeRunMode = mode;
+  if (!running) activeRunMode = '';
+  if ($('submitButton')) $('submitButton').disabled = running;
+  if ($('cancelButton')) $('cancelButton').hidden = !running || activeRunMode !== 'single';
+  if ($('batchCancelButton')) $('batchCancelButton').hidden = !running || activeRunMode !== 'batch';
+  updateBatchControls();
+}
+
+function base64UrlDecode(part){
+  const normalized = String(part || '').replace(/-/g, '+').replace(/_/g, '/');
+  const pad = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+  try{
+    const binary = atob(normalized + pad);
+    if (typeof TextDecoder !== 'undefined') {
+      return new TextDecoder().decode(Uint8Array.from(binary, ch => ch.charCodeAt(0)));
+    }
+    return binary;
+  }catch{
+    return '';
+  }
+}
+
+function decodeJwtClaims(token){
+  const parts = String(token || '').split('.');
+  if (parts.length < 2) return {};
+  try{
+    const raw = base64UrlDecode(parts[1]);
+    return raw ? JSON.parse(raw) : {};
+  }catch{
+    return {};
+  }
+}
+
+function extractJwtCandidate(raw){
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const match = text.match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+  return match ? match[0] : '';
+}
+
+function parseAccountRaw(raw, sourceLabel=''){
+  const textValue = String(raw || '').trim();
+  if (!textValue) throw new Error('内容为空');
+  let token = '';
+  let email = '';
+  let accountId = '';
+  let exp = 0;
+  let kind = 'token';
+  if (textValue.startsWith('{')) {
+    let data;
+    try{ data = JSON.parse(textValue); }
+    catch{ throw new Error('JSON 无法解析'); }
+    token = String(data.accessToken || data.access_token || '').trim();
+    const account = data.account && typeof data.account === 'object' ? data.account : {};
+    email = String(data.user?.email || account.email || data.email || '').trim();
+    accountId = String(account.id || data.account_id || '').trim();
+    kind = 'session';
+  }
+  if (!token) token = extractJwtCandidate(textValue);
+  if (!token || token.split('.').length < 3) throw new Error('未识别到 Access Token');
+  const claims = decodeJwtClaims(token);
+  const auth = claims['https://api.openai.com/auth'] || {};
+  email = email || String(claims.email || claims['https://api.openai.com/profile']?.email || '').trim();
+  accountId = accountId || String(auth.chatgpt_account_id || claims.chatgpt_account_id || '').trim();
+  exp = Number(claims.exp || 0) || 0;
+  const expired = exp > 0 && exp * 1000 <= Date.now();
+  const shortId = accountId ? accountId.slice(0, 8) : token.slice(0, 10);
+  const label = email || (accountId ? `账号 ${shortId}` : `${kind === 'session' ? 'Session' : 'Token'} ${shortId}`);
+  return {
+    id: `acct_${Date.now()}_${++accountIdSeq}`,
+    raw: textValue,
+    token,
+    email,
+    accountId,
+    exp,
+    expired,
+    kind,
+    source: sourceLabel || (kind === 'session' ? '粘贴 Session' : '粘贴 Token'),
+    label,
+    cooldownUntil: 0,
+    lastDeclineAt: 0,
+    consecutiveDeclines: 0,
+    consecutiveBlocks: 0,
+    frozenAt: 0,
+    promoStatus: 'unknown',
+    promoReason: '',
+    paymentMethods: {},
+    riskStatus: 'unknown',
+    riskReason: '',
+    lastError: '',
+    lastStatus: '',
+    lastJobId: '',
+    lastLinkType: '',
+    lastResultUrl: '',
+    lastCheckedAt: 0,
+    updatedAt: Date.now()
+  };
+}
+
+function accountFingerprint(entry){
+  return String(entry?.token || entry?.raw || '').trim();
+}
+
+function accountIdentityKey(entry){
+  const accountId = String(entry?.accountId || '').trim();
+  if (accountId) return `id:${accountId}`;
+  const email = String(entry?.email || '').trim().toLowerCase();
+  if (email) return `email:${email}`;
+  return `fp:${accountFingerprint(entry).slice(0, 48)}`;
+}
+
+function normalizeAccountPaymentMethod(value){
+  const raw = String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (!raw) return '';
+  if (raw.startsWith('paypal')) return 'paypal';
+  return ACCOUNT_PAYMENT_METHOD_ALIASES[raw] || raw.slice(0, 40);
+}
+
+function normalizeAccountPaymentMethods(value){
+  const output = {};
+  if (Array.isArray(value)) {
+    value.forEach(method => {
+      const normalized = normalizeAccountPaymentMethod(method);
+      if (normalized) output[normalized] = 'supported';
+    });
+    return output;
+  }
+  if (!value || typeof value !== 'object') return output;
+  Object.entries(value).forEach(([method, state]) => {
+    const normalized = normalizeAccountPaymentMethod(method);
+    if (!normalized) return;
+    const status = typeof state === 'string' ? state : state?.status;
+    output[normalized] = ['supported', 'rejected', 'unknown'].includes(status) ? status : 'supported';
+  });
+  return output;
+}
+
+function restoreAccountStatus(target, source){
+  target.cooldownUntil = Number(source?.cooldownUntil || target.cooldownUntil || 0);
+  target.lastDeclineAt = Number(source?.lastDeclineAt || target.lastDeclineAt || 0);
+  target.consecutiveDeclines = Number(source?.consecutiveDeclines || target.consecutiveDeclines || 0);
+  target.consecutiveBlocks = Number(source?.consecutiveBlocks || target.consecutiveBlocks || 0);
+  target.frozenAt = Number(source?.frozenAt || target.frozenAt || 0);
+  target.promoStatus = ['supported', 'unsupported', 'unknown'].includes(source?.promoStatus)
+    ? source.promoStatus : (target.promoStatus || 'unknown');
+  target.promoReason = String(source?.promoReason || target.promoReason || '').slice(0, 240);
+  target.paymentMethods = normalizeAccountPaymentMethods(source?.paymentMethods || target.paymentMethods);
+  target.riskStatus = ['clear', 'rejected', 'cooldown', 'blocked', 'frozen', 'unknown'].includes(source?.riskStatus)
+    ? source.riskStatus : (target.riskStatus || 'unknown');
+  target.riskReason = String(source?.riskReason || target.riskReason || '').slice(0, 240);
+  target.lastError = String(source?.lastError || target.lastError || '').slice(0, 240);
+  target.lastStatus = String(source?.lastStatus || target.lastStatus || '').slice(0, 40);
+  target.lastJobId = String(source?.lastJobId || target.lastJobId || '').slice(0, 120);
+  target.lastLinkType = normalizeAccountPaymentMethod(source?.lastLinkType || target.lastLinkType);
+  target.lastResultUrl = String(source?.lastResultUrl || target.lastResultUrl || '').slice(0, 2000);
+  target.lastCheckedAt = Number(source?.lastCheckedAt || target.lastCheckedAt || 0);
+  return target;
+}
+
+function isAccountInCooldown(entry, now=Date.now()){
+  return Number(entry?.cooldownUntil || 0) > now;
+}
+
+function isAccountFrozen(entry){
+  return String(entry?.riskStatus || '') === 'frozen' || Number(entry?.frozenAt || 0) > 0;
+}
+
+function formatCooldownRemaining(entry, now=Date.now()){
+  const until = Number(entry?.cooldownUntil || 0);
+  if (!until || until <= now) return '';
+  const mins = Math.ceil((until - now) / 60000);
+  if (mins >= 60) {
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return m ? `${h} 小时 ${m} 分` : `${h} 小时`;
+  }
+  return `${Math.max(1, mins)} 分钟`;
+}
+
+function formatCooldownUntil(entry){
+  const until = Number(entry?.cooldownUntil || 0);
+  if (!until) return '';
+  try{ return new Date(until).toLocaleString('zh-CN', {hour12:false}); }
+  catch{ return ''; }
+}
+
+function persistAccounts(){
+  const payload = {
+    version: 1,
+    activeId: activeAccountId || '',
+    // 私有化本机明文存储；勿提交到 git / 勿同步到公网。
+    accounts: accountEntries.map(entry => ({
+      id: entry.id,
+      raw: entry.raw,
+      token: entry.token,
+      email: entry.email || '',
+      accountId: entry.accountId || '',
+      exp: entry.exp || 0,
+      kind: entry.kind || 'token',
+      source: entry.source || '',
+      label: entry.label || '',
+      cooldownUntil: Number(entry.cooldownUntil || 0),
+      lastDeclineAt: Number(entry.lastDeclineAt || 0),
+      consecutiveDeclines: Number(entry.consecutiveDeclines || 0),
+      consecutiveBlocks: Number(entry.consecutiveBlocks || 0),
+      frozenAt: Number(entry.frozenAt || 0),
+      promoStatus: entry.promoStatus || 'unknown',
+      promoReason: String(entry.promoReason || '').slice(0, 240),
+      paymentMethods: normalizeAccountPaymentMethods(entry.paymentMethods),
+      riskStatus: entry.riskStatus || 'unknown',
+      riskReason: String(entry.riskReason || '').slice(0, 240),
+      lastError: String(entry.lastError || '').slice(0, 240),
+      lastStatus: String(entry.lastStatus || '').slice(0, 40),
+      lastJobId: String(entry.lastJobId || '').slice(0, 120),
+      lastLinkType: normalizeAccountPaymentMethod(entry.lastLinkType),
+      lastResultUrl: String(entry.lastResultUrl || '').slice(0, 2000),
+      lastCheckedAt: Number(entry.lastCheckedAt || 0),
+      updatedAt: Number(entry.updatedAt || Date.now())
+    }))
+  };
+  try{ localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(payload)); }
+  catch(error){ setAccountImportStatus(`本机保存失败：${error.message || error}`, 'error'); }
+}
+
+function loadAccountsFromStorage(){
+  accountEntries.length = 0;
+  activeAccountId = '';
+  try{
+    const raw = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const list = Array.isArray(parsed?.accounts) ? parsed.accounts : [];
+    list.forEach(item => {
+      if (!item || typeof item !== 'object') return;
+      const rawToken = String(item.raw || item.token || '').trim();
+      if (!rawToken) return;
+      let entry;
+      try{ entry = parseAccountRaw(rawToken, item.source || '本机保存'); }
+      catch{ return; }
+      entry.id = String(item.id || entry.id);
+      entry.cooldownUntil = Number(item.cooldownUntil || 0);
+      entry.lastDeclineAt = Number(item.lastDeclineAt || 0);
+      entry.consecutiveDeclines = Number(item.consecutiveDeclines || 0);
+      restoreAccountStatus(entry, item);
+      entry.updatedAt = Number(item.updatedAt || Date.now());
+      if (item.label) entry.label = String(item.label);
+      accountEntries.push(entry);
+    });
+    const wanted = String(parsed?.activeId || '');
+    if (wanted && accountEntries.some(item => item.id === wanted)) activeAccountId = wanted;
+    else if (accountEntries.length) activeAccountId = accountEntries[0].id;
+  }catch{
+    accountEntries.length = 0;
+    activeAccountId = '';
+  }
+}
+
+function setAccountImportStatus(message, tone=''){
+  const node = $('accountImportStatus');
+  if (!node) return;
+  node.textContent = message || '本机保存 · 与账号绑定冷却';
+  node.classList.toggle('is-error', tone === 'error');
+  node.classList.toggle('is-ok', tone === 'ok');
+}
+
+function accountCanBatch(entry, now=Date.now()){
+  return Boolean(entry && !entry.expired && !isAccountInCooldown(entry, now) && !isAccountFrozen(entry));
+}
+
+function getBatchSelectedAccounts(){
+  const now = Date.now();
+  return accountEntries.filter(entry => batchSelectedAccountIds.has(entry.id) && accountCanBatch(entry, now));
+}
+
+function updateBatchControls(){
+  const selectedCount = getBatchSelectedAccounts().length;
+  const batchButton = $('accountBatchRun');
+  if (batchButton) {
+    batchButton.textContent = `并发提链（${selectedCount}）`;
+    batchButton.disabled = selectedCount < 2 || Boolean(activeRunMode);
+    batchButton.title = selectedCount < 2 ? '至少勾选 2 个有效账号' : '同时创建多个独立提链任务';
+  }
+  const selectAll = $('accountSelectAll');
+  if (selectAll) {
+    const available = accountEntries.filter(entry => accountCanBatch(entry));
+    const allSelected = available.length > 0 && available.every(entry => batchSelectedAccountIds.has(entry.id));
+    selectAll.disabled = !available.length || Boolean(activeRunMode);
+    selectAll.textContent = allSelected ? '取消全选' : '全选可用';
+  }
+}
+
+function formatAccountExpiry(entry){
+  if (!entry?.exp) return '有效期未知';
+  if (entry.expired) return '已过期';
+  try{ return `至 ${new Date(entry.exp * 1000).toLocaleString('zh-CN', {hour12:false})}`; }
+  catch{ return '有效期未知'; }
+}
+
+function scheduleAccountCooldownTick(){
+  if (accountCooldownTimer) {
+    clearInterval(accountCooldownTimer);
+    accountCooldownTimer = 0;
+  }
+  if (!accountEntries.some(item => isAccountInCooldown(item))) return;
+  accountCooldownTimer = window.setInterval(() => {
+    let changed = false;
+    const now = Date.now();
+    accountEntries.forEach(entry => {
+      if (entry.cooldownUntil && entry.cooldownUntil <= now) {
+        entry.cooldownUntil = 0;
+        entry.consecutiveDeclines = 0;
+        if (entry.riskStatus === 'cooldown') {
+          entry.riskStatus = 'rejected';
+          entry.riskReason = '本机冷却已结束，尚未重新验证支付侧状态';
+        }
+        entry.updatedAt = now;
+        changed = true;
+      }
+    });
+    if (changed) persistAccounts();
+    renderAccountList();
+    if (!accountEntries.some(item => isAccountInCooldown(item))) {
+      clearInterval(accountCooldownTimer);
+      accountCooldownTimer = 0;
+    }
+  }, 30000);
+}
+
+function renderAccountList(){
+  const list = $('accountList');
+  if (!list) { updateBatchControls(); return; }
+  list.innerHTML = '';
+  if (!accountEntries.length) {
+    list.hidden = true;
+    if ($('tokenHint')) $('tokenHint').textContent = '自动识别账号信息 · 本机保存';
+    updateBatchControls();
+    return;
+  }
+  list.hidden = false;
+  const now = Date.now();
+  accountEntries.forEach(entry => {
+    const cooling = isAccountInCooldown(entry, now);
+    const frozen = isAccountFrozen(entry);
+    const available = accountCanBatch(entry, now);
+    const row = document.createElement('div');
+    row.className = 'account-chip'
+      + (entry.id === activeAccountId ? ' is-active' : '')
+      + (entry.expired ? ' is-expired' : '')
+      + (cooling ? ' is-cooldown' : '')
+      + (frozen ? ' is-frozen' : '');
+    row.dataset.accountId = entry.id;
+
+    const selectWrap = document.createElement('label');
+    selectWrap.className = 'account-batch-select';
+    selectWrap.title = available ? '加入并发提链' : (frozen ? '账号冻结中' : (cooling ? '账号冷却中' : '账号已过期'));
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'account-batch-check';
+    checkbox.checked = batchSelectedAccountIds.has(entry.id);
+    checkbox.disabled = !available;
+    checkbox.setAttribute('aria-label', `选择 ${entry.label} 并发提链`);
+    checkbox.addEventListener('click', event => event.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) batchSelectedAccountIds.add(entry.id);
+      else batchSelectedAccountIds.delete(entry.id);
+      updateBatchControls();
+    });
+    selectWrap.appendChild(checkbox);
+
+    const main = document.createElement('button');
+    main.type = 'button';
+    main.className = 'account-chip-main';
+    main.style.cssText = 'border:0;background:transparent;padding:0;cursor:pointer;text-align:left;min-width:0';
+    const title = document.createElement('span');
+    title.className = 'account-chip-title';
+    title.textContent = entry.label + (frozen ? ' · 冻结中' : (cooling ? ' · 冷却中' : ''));
+    const meta = document.createElement('span');
+    meta.className = 'account-chip-meta' + ((entry.expired || cooling || frozen) ? ' is-expired' : '');
+    const bits = [entry.source, formatAccountExpiry(entry)];
+    if (entry.accountId) bits.push(`id ${entry.accountId.slice(0, 8)}`);
+    if (frozen) bits.push(`连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(entry.consecutiveBlocks || 0))} 次 block · 需手动解冻`);
+    else if (cooling) bits.push(`冷却剩余 ${formatCooldownRemaining(entry, now)} · 至 ${formatCooldownUntil(entry)}`);
+    if (entry.promoStatus === 'supported') bits.push('优惠支持');
+    if (entry.promoStatus === 'unsupported') bits.push('优惠未生效');
+    const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
+      .filter(method => entry.paymentMethods[method] === 'supported');
+    if (supportedMethods.length) bits.push(`方式 ${supportedMethods.slice(0, 4).join('/')}`);
+    if (!cooling && entry.riskStatus === 'rejected') bits.push('最近被拒');
+    if (!cooling && !frozen && entry.riskStatus === 'blocked') bits.push('疑似封禁');
+    meta.textContent = bits.filter(Boolean).join(' · ');
+    main.append(title, meta);
+    main.addEventListener('click', () => selectAccount(entry.id));
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:6px;flex-shrink:0';
+    if (frozen) {
+      const clearFreeze = document.createElement('button');
+      clearFreeze.type = 'button';
+      clearFreeze.className = 'account-chip-remove';
+      clearFreeze.textContent = '解冻';
+      clearFreeze.title = '仅清除本机冻结标记，不代表平台侧状态已恢复';
+      clearFreeze.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearAccountFreeze(entry.id);
+      });
+      actions.appendChild(clearFreeze);
+    } else if (cooling) {
+      const clearCd = document.createElement('button');
+      clearCd.type = 'button';
+      clearCd.className = 'account-chip-remove';
+      clearCd.textContent = '清冷却';
+      clearCd.title = '仅清除本机冷却标记，不会让支付侧风控消失';
+      clearCd.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearAccountCooldown(entry.id);
+      });
+      actions.appendChild(clearCd);
+    }
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'account-chip-remove';
+    remove.textContent = '移除';
+    remove.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      removeAccount(entry.id);
+    });
+    actions.appendChild(remove);
+
+    row.append(selectWrap, main, actions);
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('button.account-chip-remove')) return;
+      selectAccount(entry.id);
+    });
+    list.appendChild(row);
+  });
+  if ($('tokenHint')) {
+    const active = accountEntries.find(item => item.id === activeAccountId);
+    if (active && isAccountInCooldown(active)) {
+      $('tokenHint').textContent = `冷却中 ${active.label} · 剩余 ${formatCooldownRemaining(active)}`;
+    } else if (active) {
+      $('tokenHint').textContent = `已选 ${active.label} · 共 ${accountEntries.length} 个账号`;
+    } else {
+      $('tokenHint').textContent = `已保存 ${accountEntries.length} 个账号 · 点击选用`;
+    }
+  }
+  scheduleAccountCooldownTick();
+  updateBatchControls();
+}
+
+function selectAccount(id){
+  const entry = accountEntries.find(item => item.id === id);
+  if (!entry) return;
+  activeAccountId = entry.id;
+  if ($('token')) $('token').value = entry.raw;
+  persistAccounts();
+  renderAccountList();
+  if (isAccountFrozen(entry)) {
+    setAccountImportStatus(
+      `已选用 ${entry.label}（本机冻结，连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(entry.consecutiveBlocks || 0))} 次 block）`,
+      'error'
+    );
+  } else if (isAccountInCooldown(entry)) {
+    setAccountImportStatus(
+      `已选用 ${entry.label}（冷却中，剩余 ${formatCooldownRemaining(entry)}，至 ${formatCooldownUntil(entry)}）`,
+      'error'
+    );
+  } else {
+    setAccountImportStatus(
+      entry.expired ? `已选用 ${entry.label}（已过期，提交可能失败）` : `已选用 ${entry.label}`,
+      entry.expired ? 'error' : 'ok'
+    );
+  }
+}
+
+function removeAccount(id){
+  const index = accountEntries.findIndex(item => item.id === id);
+  if (index < 0) return;
+  const removed = accountEntries.splice(index, 1)[0];
+  batchSelectedAccountIds.delete(id);
+  if (activeAccountId === id) {
+    activeAccountId = accountEntries[0]?.id || '';
+    if ($('token')) {
+      const next = accountEntries.find(item => item.id === activeAccountId);
+      $('token').value = next ? next.raw : '';
+    }
+  }
+  persistAccounts();
+  renderAccountList();
+  setAccountImportStatus(accountEntries.length ? `已移除 ${removed.label}` : '列表已空');
+}
+
+function clearAllAccounts(){
+  accountEntries.length = 0;
+  activeAccountId = '';
+  batchSelectedAccountIds.clear();
+  if ($('token')) $('token').value = '';
+  persistAccounts();
+  renderAccountList();
+  setAccountImportStatus('已清空本机账号列表');
+}
+
+function clearAccountRestriction(id, label='限制'){
+  const entry = accountEntries.find(item => item.id === id);
+  if (!entry) return;
+  entry.cooldownUntil = 0;
+  entry.consecutiveDeclines = 0;
+  entry.frozenAt = 0;
+  entry.consecutiveBlocks = 0;
+  if (['cooldown', 'frozen'].includes(entry.riskStatus)) {
+    entry.riskStatus = 'rejected';
+    entry.riskReason = `已清除本机${label}，支付侧状态仍需重新验证`;
+  }
+  entry.updatedAt = Date.now();
+  persistAccounts();
+  renderAccountList();
+  setAccountImportStatus(`已清除 ${entry.label} 的本机${label}标记`, 'ok');
+}
+
+function clearAccountCooldown(id){
+  clearAccountRestriction(id, '冷却');
+}
+
+function clearAccountFreeze(id){
+  clearAccountRestriction(id, '冻结');
+}
+
+function markAccountCooldown(target, ms=ACCOUNT_COOLDOWN_MS, reason=''){
+  if (!target) return null;
+  const now = Date.now();
+  const frozen = isAccountFrozen(target);
+  target.cooldownUntil = now + Math.max(60_000, Number(ms) || ACCOUNT_COOLDOWN_MS);
+  target.lastDeclineAt = now;
+  target.consecutiveDeclines = Math.max(3, Number(target.consecutiveDeclines || 0) + 1);
+  target.riskStatus = frozen ? 'frozen' : 'cooldown';
+  target.riskReason = String(
+    frozen ? (target.riskReason || '账号已冻结；PayPal 风控熔断未解除冻结') : (reason || 'PayPal 风控熔断，已进入本机冷却')
+  ).slice(0, 240);
+  target.lastError = target.riskReason;
+  target.lastCheckedAt = now;
+  target.updatedAt = now;
+  activeAccountId = target.id;
+  batchSelectedAccountIds.delete(target.id);
+  persistAccounts();
+  renderAccountList();
+  setAccountImportStatus(
+    `${target.label} 已进入冷却 ${formatCooldownRemaining(target)}（至 ${formatCooldownUntil(target)}）${reason ? ' · ' + reason : ''}`,
+    'error'
+  );
+  return target;
+}
+
+function markActiveAccountCooldown(ms=ACCOUNT_COOLDOWN_MS, reason=''){
+  let target = accountEntries.find(item => item.id === activeAccountId);
+  const tokenRaw = String($('token')?.value || '').trim();
+  if (!target && tokenRaw) {
+    try{
+      const parsed = parseAccountRaw(tokenRaw, '当前输入');
+      target = accountEntries.find(item => accountIdentityKey(item) === accountIdentityKey(parsed));
+      if (!target) {
+        target = upsertAccountEntry(parsed).entry;
+        activeAccountId = target.id;
+      }
+    }catch{ target = null; }
+  }
+  if (!target) {
+    setAccountImportStatus('任务已熔断，但未能匹配到本机账号（可先导入/点选账号）', 'error');
+    return null;
+  }
+  return markAccountCooldown(target, ms, reason);
+}
+
+function getActiveAccountCooldownBlocker(){
+  const tokenRaw = String($('token')?.value || '').trim();
+  if (!tokenRaw) return null;
+  let parsed = null;
+  try{ parsed = parseAccountRaw(tokenRaw, 'submit-check'); }catch{ /* 交给后端 */ }
+  const matched = accountEntries.find(item => {
+    if (activeAccountId && item.id === activeAccountId && String(item.raw || '').trim() === tokenRaw) return true;
+    if (parsed && accountIdentityKey(item) === accountIdentityKey(parsed)) return true;
+    return accountFingerprint(item) === accountFingerprint({token: extractJwtCandidate(tokenRaw), raw: tokenRaw});
+  });
+  if (matched && (isAccountInCooldown(matched) || isAccountFrozen(matched))) return matched;
+  return null;
+}
+
+function upsertAccountEntry(entry){
+  const identity = accountIdentityKey(entry);
+  const existingIndex = accountEntries.findIndex(item =>
+    accountIdentityKey(item) === identity || accountFingerprint(item) === accountFingerprint(entry)
+  );
+  if (existingIndex >= 0) {
+    const old = accountEntries[existingIndex];
+    entry.id = old.id;
+    entry.cooldownUntil = Math.max(Number(entry.cooldownUntil || 0), Number(old.cooldownUntil || 0));
+    entry.lastDeclineAt = Number(old.lastDeclineAt || entry.lastDeclineAt || 0);
+    entry.consecutiveDeclines = Number(old.consecutiveDeclines || entry.consecutiveDeclines || 0);
+    restoreAccountStatus(entry, old);
+    entry.updatedAt = Date.now();
+    accountEntries[existingIndex] = entry;
+    return {entry, added: false};
+  }
+  accountEntries.push(entry);
+  return {entry, added: true};
+}
+
+function accountRiskFromFailure(data){
+  const errorText = String(data?.error || data?.text || '');
+  const errorCode = String(data?.error_code || '').toLowerCase();
+  if (isPaypalFuse(data)) {
+    return {status: 'cooldown', reason: 'PayPal 风控熔断，已进入本机冷却；不等同于账号永久封禁'};
+  }
+  if (
+    /account_(?:blocked|banned|suspended|restricted)/i.test(errorCode)
+    || /(?:account|账号|账户).{0,40}(?:blocked|banned|suspend|denied|封禁|停用|冻结|禁止|拒绝)/i.test(errorText)
+  ) {
+    return {status: 'blocked', reason: errorText.slice(0, 240)};
+  }
+  if (
+    ['generic_decline', 'setup_attempt_failed', 'checkout_approval_payment_failure'].some(code => errorCode.includes(code))
+    || /generic_decline|setup_attempt_failed|checkout_approval_payment_failure|支付被拒绝|支付通道拒绝|payment method.*declin|支付失败/i.test(errorText)
+  ) {
+    return {status: 'rejected', reason: errorText.slice(0, 240)};
+  }
+  return {status: 'unknown', reason: errorText.slice(0, 240)};
+}
+
+function recordAccountOutcome(target, data, requestedMethod='', jobId=''){
+  if (!target) return null;
+  const now = Date.now();
+  const result = data?.result && typeof data.result === 'object' ? data.result : {};
+  const outcomeStatus = String(data?.status || '').toLowerCase();
+  const frozenBeforeOutcome = isAccountFrozen(target);
+  const methods = normalizeAccountPaymentMethods(
+    result.oaics_payment_method_types || result.payment_method_types || []
+  );
+  target.paymentMethods = normalizeAccountPaymentMethods(target.paymentMethods);
+  Object.assign(target.paymentMethods, methods);
+  const resultLinkType = normalizeAccountPaymentMethod(result.link_type || requestedMethod);
+  if (resultLinkType && outcomeStatus === 'done') target.paymentMethods[resultLinkType] = 'supported';
+  if (result.oaics_paypal_available === true) target.paymentMethods.paypal = 'supported';
+
+  const promoSignals = [
+    result.entry_trial_eligible,
+    result.checkout_trial_eligible,
+    result.promo_applied,
+    result.promo_update_accepted
+  ];
+  const promoFailure = String(data?.error_code || '').toLowerCase() === 'promo_not_applied'
+    || /优惠(?:金额)?校验失败|优惠.*未生效|优惠.*未归零/.test(String(data?.error || data?.text || ''));
+  if (promoFailure) {
+    target.promoStatus = 'unsupported';
+    target.promoReason = '最终金额校验未归零，任务已停止重试';
+  } else if (promoSignals.some(value => value === true)) {
+    target.promoStatus = 'supported';
+    target.promoReason = '最近一次 Checkout/优惠结果明确支持';
+  } else if (promoSignals.some(value => value === false) || (result.promo_requested === true && outcomeStatus === 'done')) {
+    target.promoStatus = 'unsupported';
+    target.promoReason = '最近一次任务未确认优惠生效';
+  }
+
+  target.lastCheckedAt = now;
+  target.lastJobId = String(jobId || target.lastJobId || '').slice(0, 120);
+  target.lastStatus = outcomeStatus.slice(0, 40);
+  target.lastError = String(data?.error || '').slice(0, 240);
+  target.lastLinkType = resultLinkType || target.lastLinkType;
+  if (outcomeStatus === 'done') {
+    const resultLink = resultUrl(result);
+    if (resultLink) target.lastResultUrl = resultLink;
+    if (!frozenBeforeOutcome) {
+      target.consecutiveBlocks = 0;
+      target.riskStatus = 'clear';
+      target.riskReason = '最近一次任务完成，未发现拒绝或封禁信号';
+    }
+    target.lastError = '';
+  } else if (outcomeStatus === 'error') {
+    const risk = accountRiskFromFailure(data);
+    if (risk.status === 'blocked' && !frozenBeforeOutcome) {
+      target.consecutiveBlocks = isAccountBlockFuse(data)
+        ? ACCOUNT_BLOCK_STREAK_LIMIT
+        : Math.max(0, Number(target.consecutiveBlocks || 0)) + 1;
+      if (target.consecutiveBlocks >= ACCOUNT_BLOCK_STREAK_LIMIT) {
+        target.frozenAt = now;
+        target.cooldownUntil = 0;
+        target.riskStatus = 'frozen';
+        target.riskReason = `连续 ${target.consecutiveBlocks} 次明确 block，已进入本机冻结：${risk.reason || '账号封禁信号'}`.slice(0, 240);
+        activeAccountId = target.id;
+        batchSelectedAccountIds.delete(target.id);
+      } else {
+        target.riskStatus = 'blocked';
+        target.riskReason = `${risk.reason || '检测到账号封禁信号'}（连续 ${target.consecutiveBlocks}/${ACCOUNT_BLOCK_STREAK_LIMIT} 次）`.slice(0, 240);
+      }
+    } else if (!frozenBeforeOutcome) {
+      target.consecutiveBlocks = 0;
+      target.riskStatus = risk.status;
+      target.riskReason = risk.reason;
+    }
+    if (risk.status !== 'unknown' && resultLinkType) {
+      target.paymentMethods[resultLinkType] = ['rejected', 'cooldown'].includes(risk.status) ? 'rejected' : 'unknown';
+    }
+  }
+  target.updatedAt = now;
+  persistAccounts();
+  renderAccountList();
+  return target;
+}
+
+function findAccountForToken(tokenRaw, create=false){
+  const raw = String(tokenRaw || '').trim();
+  let target = accountEntries.find(item =>
+    activeAccountId && item.id === activeAccountId && String(item.raw || '').trim() === raw
+  );
+  if (!target && raw) {
+    try {
+      const parsed = parseAccountRaw(raw, '任务记录');
+      target = accountEntries.find(item => accountIdentityKey(item) === accountIdentityKey(parsed));
+      if (!target && create) target = upsertAccountEntry(parsed).entry;
+    } catch { /* 手动输入的非标准 Token 不写入账号状态列表 */ }
+  }
+  return target || null;
+}
+
+function recordActiveAccountOutcome(data, requestedMethod='', jobId=''){
+  const target = findAccountForToken($('token')?.value || '', true);
+  return target ? recordAccountOutcome(target, data, requestedMethod, jobId) : null;
+}
+
+function splitAccountImportText(raw, sourceLabel='手动粘贴'){
+  const textValue = String(raw || '').trim();
+  if (!textValue) return [{text: '', source: sourceLabel}];
+  if (textValue.startsWith('{')) return [{text: textValue, source: sourceLabel}];
+  const matches = [...textValue.matchAll(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g)]
+    .map(match => match[0])
+    .filter((token, index, list) => list.indexOf(token) === index);
+  if (matches.length > 1) {
+    return matches.map((token, index) => ({text: token, source: `${sourceLabel}#${index + 1}`}));
+  }
+  return [{text: textValue, source: sourceLabel}];
+}
+
+function importAccountTexts(items){
+  let added = 0;
+  let updated = 0;
+  let failed = 0;
+  const errors = [];
+  Array.from(items || []).forEach(item => {
+    try{
+      const parsed = parseAccountRaw(item.text, item.source);
+      const result = upsertAccountEntry(parsed);
+      if (result.added) added += 1;
+      else updated += 1;
+      activeAccountId = result.entry.id;
+      if ($('token')) $('token').value = result.entry.raw;
+    }catch(error){
+      failed += 1;
+      errors.push(`${item.source}: ${error.message || error}`);
+    }
+  });
+  persistAccounts();
+  renderAccountList();
+  if (!added && !updated) {
+    setAccountImportStatus(errors[0] || '没有可导入的账号', 'error');
+    return;
+  }
+  const parts = [];
+  if (added) parts.push(`新增 ${added}`);
+  if (updated) parts.push(`更新 ${updated}`);
+  if (failed) parts.push(`失败 ${failed}`);
+  setAccountImportStatus(parts.join(' · ') + ' · 已写入本机', failed && !added && !updated ? 'error' : 'ok');
+}
+
+function importPastedAccounts(){
+  const raw = String($('token')?.value || '').trim();
+  if (!raw) {
+    setAccountImportStatus('请先在文本框粘贴 AT 或 Session JSON', 'error');
+    $('token')?.focus();
+    return;
+  }
+  importAccountTexts(splitAccountImportText(raw, '手动粘贴'));
+}
+
+async function importAccountFiles(fileList){
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const items = [];
+  for (const file of files) {
+    try{
+      const textValue = await file.text();
+      const trimmed = String(textValue || '').trim();
+      if (!trimmed) { items.push({text: '', source: file.name}); continue; }
+      items.push(...splitAccountImportText(trimmed, file.name));
+    }catch(error){
+      items.push({text: '', source: `${file.name}（读取失败: ${error.message || error}）`});
+    }
+  }
+  importAccountTexts(items);
+}
+
+function initializeAccountManager(){
+  loadAccountsFromStorage();
+  const fileInput = $('accountFileInput');
+  const clearButton = $('accountClearAll');
+  $('accountImportPaste')?.addEventListener('click', importPastedAccounts);
+  $('accountSelectAll')?.addEventListener('click', () => {
+    const available = accountEntries.filter(entry => accountCanBatch(entry));
+    const allSelected = available.length > 0 && available.every(entry => batchSelectedAccountIds.has(entry.id));
+    available.forEach(entry => {
+      if (allSelected) batchSelectedAccountIds.delete(entry.id);
+      else batchSelectedAccountIds.add(entry.id);
+    });
+    renderAccountList();
+    setAccountImportStatus(allSelected ? '已取消全部批量选择' : `已选择 ${available.length} 个可用账号`, 'ok');
+  });
+  $('accountBatchRun')?.addEventListener('click', () => void startBatchCheckout());
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      try{ await importAccountFiles(fileInput.files); }
+      finally{ fileInput.value = ''; }
+    });
+  }
+  clearButton?.addEventListener('click', () => {
+    if (accountEntries.length && !window.confirm('确认清空本机保存的全部账号？')) return;
+    clearAllAccounts();
+  });
+  $('token')?.addEventListener('input', () => {
+    if (!activeAccountId) return;
+    const active = accountEntries.find(item => item.id === activeAccountId);
+    if (!active) return;
+    if ($('token').value.trim() !== String(active.raw || '').trim()) {
+      activeAccountId = '';
+      persistAccounts();
+      renderAccountList();
+      setAccountImportStatus('已改为手动输入 Token');
+    }
+  });
+  if (activeAccountId) {
+    const active = accountEntries.find(item => item.id === activeAccountId);
+    if (active && $('token') && !$('token').value.trim()) $('token').value = active.raw;
+  }
+  renderAccountList();
+  if (accountEntries.length) setAccountImportStatus(`已从本机恢复 ${accountEntries.length} 个账号`, 'ok');
+  else setAccountImportStatus('本机保存 · 与账号绑定冷却');
+}
+
+async function loadTaskLimits(){
+  try{
+    const response = await fetch('/api/config', {cache:'no-store'});
+    const data = await response.json().catch(() => ({}));
+    const limits = data.task_limits || {};
+    taskLimits = {
+      perIp: Math.max(1, Number(limits.per_ip_rpm) || taskLimits.perIp),
+      global: Math.max(1, Number(limits.global_rpm) || taskLimits.global),
+      workers: Math.max(1, Number(limits.workers) || taskLimits.workers)
+    };
+    updateBatchControls();
+  }catch{ /* the local defaults keep batch selection usable offline */ }
+}
+
+function isTerminalJobStatus(status){ return ['done', 'error', 'cancelled'].includes(String(status || '')); }
+
+function isPaypalFuse(data){
+  const errorText = String(data?.error || data?.text || '');
+  const errorCode = String(data?.error_code || '');
+  return errorCode === 'paypal_generic_decline_fuse'
+    || /连续\s*\d+\s*次\s*PayPal\s*风控拒绝/.test(errorText)
+    || /PayPal 风控熔断/.test(errorText);
+}
+
+function isAccountBlockFuse(data){
+  const errorCode = String(data?.error_code || '').toLowerCase();
+  const errorText = String(data?.error || data?.text || '');
+  return errorCode === ACCOUNT_BLOCK_FUSE_ERROR_CODE
+    || /连续\s*\d+\s*次明确\s*account\s*block/i.test(errorText);
+}
+
+function resultUrl(result){
+  const candidates = [
+    result?.provider_redirect_url,
+    result?.paypal_link,
+    result?.url,
+    result?.link,
+    result?.checkout_url
+  ];
+  return candidates.map(value => String(value || '').trim()).find(value => {
+    try{
+      const parsed = new URL(value);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    }catch{ return false; }
+  }) || '';
+}
 
 function showResult(result){
+  if (!$('resultPanel')) return;
+  const url = resultUrl(result);
   $('resultPanel').hidden = false;
-  const managedSuffix = result.checkout_flow === 'openai_managed' ? ' · OPENAI 官方托管' : '';
-  $('resultType').textContent = `${String(result.plan||'').toUpperCase()} · ${String(result.link_type||'').toUpperCase()}${managedSuffix}`;
-  $('resultEmail').textContent = result.account_email || '—';
-  $('resultRegion').textContent = `${result.country || '—'} / ${result.currency || '—'}`;
-  $('resultPromo').textContent = !result.promo_requested ? '未请求' : result.promo_applied === true ? '已生效 · 今日应付 0' : result.promo_applied === false ? '未生效' : '打开结账页确认';
-  $('resultSession').textContent = result.checkout_session_id || '—';
-  const finalValue = result.qr_data || result.provider_redirect_url || result.checkout_url || '';
-  $('resultValue').value = finalValue;
-  const openUrl = result.provider_redirect_url || result.checkout_url || '';
-  $('openResult').href = openUrl || '#';
-  $('openResult').textContent = result.checkout_flow === 'openai_managed' ? '打开官方结账页' : '打开链接';
-  $('openResult').style.display = openUrl ? 'inline-flex' : 'none';
-  const qr = result.qr_image_png || result.qr_image_svg || '';
-  $('qrWrap').hidden = !qr;
-  if (qr) $('qrImage').src = qr;
-  startCountdown(result.expires_at);
-  $('resultPanel').scrollIntoView({behavior:'smooth',block:'nearest'});
-}
-function startCountdown(expiresAt){
-  clearInterval(countdownTimer); const node = $('qrCountdown');
-  if (!expiresAt) { node.textContent = ''; return; }
-  const render = () => { const remain = Math.max(0, Number(expiresAt)*1000-Date.now()); const m=Math.floor(remain/60000),s=Math.floor(remain%60000/1000); node.textContent=remain?`二维码剩余 ${m}:${String(s).padStart(2,'0')}`:'二维码已到期'; };
-  render(); countdownTimer=setInterval(render,1000);
+  if ($('resultType')) $('resultType').textContent = railDisplayNames[result?.link_type] || result?.link_type || '—';
+  if ($('resultEmail')) $('resultEmail').textContent = result?.account_email || result?.account_id || '—';
+  if ($('resultRegion')) $('resultRegion').textContent = [result?.checkout_country || result?.country, result?.checkout_currency || result?.currency].filter(Boolean).join(' / ') || '—';
+  if ($('resultPromo')) {
+    const promo = result?.promo_applied === true || result?.promo_update_accepted === true ? '已应用' : result?.promo_requested ? '已尝试' : '未使用';
+    $('resultPromo').textContent = promo;
+  }
+  if ($('resultSession')) $('resultSession').textContent = result?.checkout_session_id || '—';
+  if ($('resultValue')) $('resultValue').value = url;
+  if ($('openResult')) {
+    $('openResult').href = url || '#';
+    $('openResult').hidden = !url;
+  }
 }
 
-async function poll(){
-  if (!jobId) return;
-  try{
-    const r = await fetch(`/api/checkout-progress?job_id=${encodeURIComponent(jobId)}`, {cache:'no-store'});
-    const data = await r.json(); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-    setProgress(data.percent, data.text, data.status);
-    renderLogs(data.logs);
-    if (data.status === 'done') { clearInterval(pollTimer); setRunning(false); showResult(data.result || {}); }
-    if (data.status === 'error' || data.status === 'cancelled') { clearInterval(pollTimer); setRunning(false); if(data.error) renderLogs([...(data.logs||[]),{time:'ERROR',message:data.error}]); }
-  }catch(e){ clearInterval(pollTimer); setRunning(false); setProgress(100, e.message || String(e), 'error'); }
-}
-
-form.addEventListener('submit', async (event) => {
-  event.preventDefault(); $('resultPanel').hidden = true; $('logBox').innerHTML = '<div class="empty-log">正在创建任务…</div>';
-  renderedLogKey = '';
-  logAutoFollow = true;
+function buildCheckoutBody(tokenValue){
   const plan = selected('plan');
   const linkType = selected('link_type');
-  const billingProfile = readBillingProfile();
+  const billingProfile = linkType === 'gopay' ? readBillingProfile() : null;
+  const paypalBillingSelection = readPaypalBillingSelection();
+  return {
+    token: String(tokenValue || ''), plan, link_type: linkType, country: $('country').value,
+    currency: $('currency').value, entry_proxies: proxyLines($('entryProxy')), exit_proxies: proxyLines($('exitProxy')),
+    billing_profile: billingProfile && billingProfileHasContent(billingProfile) ? billingProfile : null,
+    billing_selection: paypalBillingSelection,
+    retry_count: Math.max(1, Math.min(50, Number($('retryCount').value || 10))),
+    use_promo: plan === 'plus' && $('usePromo').checked,
+    promo_campaign: plan === 'plus' ? $('promoCampaign').value.trim() : '',
+    promo_code: plan === 'team' ? $('promoCode').value.trim() : '',
+    workspace_name: plan === 'codex_low' ? $('codexWorkspaceName').value.trim() : $('workspaceName').value.trim(),
+    workspace_id: $('workspaceId').value.trim(), seat_quantity: Number($('seatQuantity').value || 5),
+    price_interval: $('priceInterval').value, credit_quantity: Number($('creditQuantity').value || 13),
+    ideal_bank: '',
+    pix_tax_id: linkType === 'pix' ? $('pixTaxId').value.trim() : '',
+    pix_auto_kind: linkType === 'pix' ? $('pixAutoKind').value : 'cpf'
+  };
+}
+
+function validateCheckoutOptions({batch=false}={}){
+  const linkType = selected('link_type');
+  const billingProfile = linkType === 'gopay' ? readBillingProfile() : null;
+  const paypalBillingSelection = readPaypalBillingSelection();
   if (linkType === 'gopay') {
     const missing = billingProfileMissing(billingProfile);
     if (missing.length) {
@@ -728,44 +1871,353 @@ form.addEventListener('submit', async (event) => {
       setProgress(100, `Gopay 账单档案缺少：${missing.join('、')}`, 'error');
       const firstMissing = {name: 'billingName', line1: 'billingLine1', city: 'billingCity', postal_code: 'billingPostalCode'};
       $(firstMissing[Object.keys(firstMissing).find(field => !String(billingProfile[field] || '').trim())] || 'billingName')?.focus();
-      return;
+      return false;
     }
   }
+  if (linkType === 'paypal' && paypalBillingSource() !== 'auto' && !paypalBillingSelection) {
+    setPaypalBillingStatus('请先选择地址国家和具体账单地址。', 'error');
+    setProgress(100, 'PayPal 指定账单地址尚未选择完成', 'error');
+    const target = $('paypalBillingCountry').value ? $('paypalBillingAddress') : $('paypalBillingCountry');
+    target?.focus();
+    return false;
+  }
+  if (!batch) {
+    const cooldownBlocker = getActiveAccountCooldownBlocker();
+    if (cooldownBlocker) {
+      const frozen = isAccountFrozen(cooldownBlocker);
+      setProgress(
+        100,
+        frozen
+          ? `${cooldownBlocker.label} 已冻结（连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(cooldownBlocker.consecutiveBlocks || 0))} 次 block），请先手动解冻或更换账号。`
+          : `${cooldownBlocker.label} 冷却中（剩余 ${formatCooldownRemaining(cooldownBlocker)}，至 ${formatCooldownUntil(cooldownBlocker)}）。请更换账号/代理或等待冷却结束。`,
+        'error'
+      );
+      setAccountImportStatus(
+        frozen
+          ? `提交已拦截：${cooldownBlocker.label} 处于本机冻结状态`
+          : `提交已拦截：${cooldownBlocker.label} 冷却剩余 ${formatCooldownRemaining(cooldownBlocker)}`,
+        'error'
+      );
+      return false;
+    }
+  }
+  return true;
+}
+
+function validateFormForBatch(){
+  const token = $('token');
+  const required = token?.required;
+  if (token) token.required = false;
+  let valid = true;
+  try{
+    valid = typeof form.checkValidity !== 'function' || form.checkValidity();
+    if (!valid) form.reportValidity?.();
+  }finally{
+    if (token) token.required = required;
+  }
+  return valid;
+}
+
+async function poll(){
+  if (!jobId || activeRunMode !== 'single') return;
+  try{
+    const r = await fetch(`/api/checkout-progress?job_id=${encodeURIComponent(jobId)}`, {cache:'no-store'});
+    const data = await r.json(); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    setProgress(data.percent, data.text, data.status);
+    renderLogs(data.logs);
+    if (data.status === 'done') {
+      clearInterval(pollTimer);
+      setRunning(false);
+      recordActiveAccountOutcome(data, selected('link_type'), jobId);
+      showResult(data.result || {});
+    }
+    if (data.status === 'error' || data.status === 'cancelled') {
+      clearInterval(pollTimer);
+      setRunning(false);
+      recordActiveAccountOutcome(data, selected('link_type'), jobId);
+      if (data.error) renderLogs([...(data.logs||[]),{time:'ERROR',message:data.error}]);
+      if (isPaypalFuse(data)) markActiveAccountCooldown(ACCOUNT_COOLDOWN_MS, '任务风控熔断');
+    }
+  }catch(e){
+    clearInterval(pollTimer);
+    setRunning(false);
+    setProgress(100, e.message || String(e), 'error');
+  }
+}
+
+function batchStatusLabel(status){
+  return ({creating:'创建中', queued:'排队中', running:'运行中', done:'完成', error:'失败', cancelled:'已停止'}[status] || '等待');
+}
+
+async function cancelBatchJob(job){
+  if (!job?.jobId || isTerminalJobStatus(job.status) || job.cancelPending) return false;
+  job.cancelPending = true;
+  job.text = '正在停止…';
+  renderBatchJobs();
+  try{
+    const response = await fetch('/api/checkout-cancel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({job_id: job.jobId})
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) throw new Error(data.error || `取消失败（HTTP ${response.status}）`);
+    job.status = 'cancelled';
+    job.percent = 100;
+    job.text = '任务已停止';
+    job.error = '任务已停止';
+    job.cancelPending = false;
+    recordAccountOutcome(job.entry, {status: 'cancelled', error: '任务已停止'}, job.requestedMethod, job.jobId);
+    renderBatchJobs();
+    updateBatchAggregate();
+    return true;
+  }catch(error){
+    job.cancelPending = false;
+    job.text = '取消失败';
+    job.error = error.message || String(error);
+    renderBatchJobs();
+    updateBatchAggregate();
+    return false;
+  }
+}
+
+function renderBatchJobs(){
+  const list = $('batchJobList');
+  if (!list) return;
+  list.innerHTML = '';
+  batchJobs.forEach(job => {
+    const row = document.createElement('div');
+    row.className = `batch-job-row is-${isTerminalJobStatus(job.status) ? job.status : (job.status === 'creating' ? 'running' : job.status)}`;
+    const main = document.createElement('div');
+    main.className = 'batch-job-main';
+    const title = document.createElement('b');
+    title.className = 'batch-job-title';
+    title.textContent = job.label;
+    const text = document.createElement('small');
+    text.className = 'batch-job-text';
+    text.textContent = job.error || job.text || '等待任务';
+    const progress = document.createElement('div');
+    progress.className = 'batch-job-progress';
+    const progressValue = document.createElement('i');
+    progressValue.style.width = `${Math.max(0, Math.min(100, Number(job.percent) || 0))}%`;
+    progress.appendChild(progressValue);
+    main.append(title, text, progress);
+    const side = document.createElement('div');
+    side.className = 'batch-job-side';
+    const status = document.createElement('span');
+    status.className = 'batch-job-status';
+    status.textContent = batchStatusLabel(job.status);
+    side.appendChild(status);
+    const url = resultUrl(job.result);
+    if (url) {
+      const link = document.createElement('a');
+      link.className = 'batch-job-link';
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = '打开结果 ↗';
+      side.appendChild(link);
+    }
+    if (job.jobId && !isTerminalJobStatus(job.status)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'batch-job-cancel';
+      cancel.textContent = job.cancelPending ? '正在停止…' : '停止';
+      cancel.disabled = Boolean(job.cancelPending);
+      cancel.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void cancelBatchJob(job);
+      });
+      side.appendChild(cancel);
+    }
+    row.append(main, side);
+    list.appendChild(row);
+  });
+}
+
+function renderBatchLogs(){
+  const rows = [];
+  batchJobs.forEach(job => {
+    const logs = Array.isArray(job.logs) ? job.logs.slice(-15) : [];
+    logs.forEach(item => rows.push({time:item.time, message:`${job.label} · ${item.message}`}));
+    if (job.error && isTerminalJobStatus(job.status) && !logs.length) rows.push({time:'ERROR', message:`${job.label} · ${job.error}`});
+  });
+  rows.sort((a, b) => String(a.time).localeCompare(String(b.time)));
+  renderLogs(rows.slice(-180));
+}
+
+function updateBatchAggregate(){
+  if (!batchJobs.length) return;
+  const total = batchJobs.length;
+  const done = batchJobs.filter(job => job.status === 'done').length;
+  const failed = batchJobs.filter(job => job.status === 'error').length;
+  const cancelled = batchJobs.filter(job => job.status === 'cancelled').length;
+  const terminal = done + failed + cancelled;
+  const active = total - terminal;
+  const percent = Math.round(batchJobs.reduce((sum, job) => sum + Math.max(0, Math.min(100, Number(job.percent) || 0)), 0) / total);
+  const complete = terminal === total;
+  const status = complete ? (done === total ? 'done' : (cancelled === total ? 'cancelled' : 'error')) : 'running';
+  const summary = complete
+    ? `批量结束：${done} 个完成${failed ? ` · ${failed} 个失败` : ''}${cancelled ? ` · ${cancelled} 个已停止` : ''}`
+    : `${done}/${total} 个完成 · ${active} 个任务处理中`;
+  if ($('batchSummary')) $('batchSummary').textContent = summary;
+  if ($('batchBadge')) {
+    $('batchBadge').className = `status-badge ${status}`;
+    $('batchBadge').textContent = complete ? (status === 'done' ? '完成' : status === 'cancelled' ? '已停止' : '部分异常') : '运行中';
+  }
+  setProgress(percent, summary, status);
+  if (complete && activeRunMode === 'batch') {
+    clearInterval(batchPollTimer);
+    batchPollTimer = 0;
+    setRunning(false);
+  }
+}
+
+async function pollBatch(){
+  if (!batchJobs.length || activeRunMode !== 'batch') return;
+  const activeJobs = batchJobs.filter(job => job.jobId && !isTerminalJobStatus(job.status));
+  if (!activeJobs.length) {
+    updateBatchAggregate();
+    return;
+  }
+  await Promise.all(activeJobs.map(async job => {
+    try{
+      const response = await fetch(`/api/checkout-progress?job_id=${encodeURIComponent(job.jobId)}`, {cache:'no-store'});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      job.status = data.status || job.status;
+      job.percent = Number(data.percent) || 0;
+      job.text = String(data.text || '处理中');
+      job.error = String(data.error || '');
+      job.result = data.result || job.result;
+      job.logs = Array.isArray(data.logs) ? data.logs : job.logs;
+      if (isTerminalJobStatus(job.status)) recordAccountOutcome(job.entry, data, job.requestedMethod, job.jobId);
+      if (isPaypalFuse(data)) markAccountCooldown(job.entry, ACCOUNT_COOLDOWN_MS, '批量任务风控熔断');
+    }catch(error){
+      job.status = 'error';
+      job.percent = 100;
+      job.error = error.message || String(error);
+      job.text = '任务轮询失败';
+      recordAccountOutcome(job.entry, {status: 'error', error: job.error}, job.requestedMethod, job.jobId);
+    }
+  }));
+  renderBatchJobs();
+  renderBatchLogs();
+  updateBatchAggregate();
+}
+
+async function startSingleCheckout(){
+  if (!validateCheckoutOptions()) return;
   resetProgress();
-  setRunning(true); setProgress(3, '提交任务', 'running');
-  const body = {
-    token: $('token').value, plan, link_type: linkType, country: $('country').value,
-    currency: $('currency').value, entry_proxies: proxyLines($('entryProxy')), exit_proxies: proxyLines($('exitProxy')),
-    billing_profile: billingProfileHasContent(billingProfile) ? billingProfile : null,
-    retry_count: Math.max(1, Math.min(50, Number($('retryCount').value || 10))),
-    use_promo: plan === 'plus' && $('usePromo').checked,
-    promo_campaign: plan === 'plus' ? $('promoCampaign').value.trim() : '',
-    promo_code: plan === 'team' ? $('promoCode').value.trim() : '',
-    workspace_name: plan === 'codex_low' ? $('codexWorkspaceName').value.trim() : $('workspaceName').value.trim(),
-    workspace_id: $('workspaceId').value.trim(), seat_quantity: Number($('seatQuantity').value || 5),
-    price_interval: $('priceInterval').value, credit_quantity: Number($('creditQuantity').value || 13),
-    ideal_bank: '',
-    pix_tax_id: selected('link_type') === 'pix' ? $('pixTaxId').value.trim() : '',
-    pix_auto_kind: selected('link_type') === 'pix' ? $('pixAutoKind').value : 'cpf'
-  };
+  $('resultPanel').hidden = true;
+  $('batchPanel').hidden = true;
+  $('logBox').innerHTML = '<div class="empty-log">正在创建任务…</div>';
+  renderedLogKey = '';
+  logAutoFollow = true;
+  setRunning(true, 'single');
+  setProgress(3, '提交任务', 'running');
+  const body = buildCheckoutBody($('token').value);
   try{
     const r = await fetch('/api/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data = await r.json(); if(!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
     jobId = data.job_id;
     if (data.queue_position > 0) setProgress(2, `任务已进入队列，当前第 ${data.queue_position} 位`, 'queued');
-    clearInterval(pollTimer); await poll(); pollTimer=setInterval(poll,1200);
+    clearInterval(pollTimer); await poll();
+    if (activeRunMode === 'single') pollTimer=setInterval(poll,1200);
   }catch(e){ setRunning(false); setProgress(100,e.message||String(e),'error'); }
+}
+
+async function startBatchCheckout(){
+  if (activeRunMode) return;
+  const accounts = getBatchSelectedAccounts();
+  if (accounts.length < 2) {
+    setAccountImportStatus('请至少勾选 2 个有效账号后再并发提链', 'error');
+    return;
+  }
+  if (accounts.length > taskLimits.perIp) {
+    setAccountImportStatus(`当前 IP 每分钟最多创建 ${taskLimits.perIp} 个任务，本批请最多勾选 ${taskLimits.perIp} 个账号`, 'error');
+    setProgress(100, `批量任务超过当前 IP 限制：最多 ${taskLimits.perIp} 个`, 'error');
+    return;
+  }
+  if (!validateFormForBatch() || !validateCheckoutOptions({batch:true})) return;
+  resetProgress();
+  $('resultPanel').hidden = true;
+  $('batchPanel').hidden = false;
+  $('logBox').innerHTML = `<div class="empty-log">正在同时创建 ${accounts.length} 个账号任务…</div>`;
+  renderedLogKey = '';
+  logAutoFollow = true;
+  batchJobs = accounts.map(entry => ({
+    entry, label: entry.label, requestedMethod: selected('link_type'), jobId: '', status: 'creating', percent: 1,
+    text: '正在创建任务', error: '', result: null, logs: []
+  }));
+  renderBatchJobs();
+  updateBatchAggregate();
+  setRunning(true, 'batch');
+  const baseBody = buildCheckoutBody('');
+  await Promise.all(batchJobs.map(async job => {
+    try{
+      const response = await fetch('/api/checkout', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({...baseBody, token: job.entry.raw})
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      job.jobId = String(data.job_id || '');
+      if (!job.jobId) throw new Error('服务未返回任务 ID');
+      job.status = 'queued';
+      job.percent = Number(data.queue_position) > 0 ? 2 : 3;
+      job.text = Number(data.queue_position) > 0 ? `排队中 · 前方 ${data.queue_position - 1} 个任务` : '等待执行';
+    }catch(error){
+      job.status = 'error';
+      job.percent = 100;
+      job.error = error.message || String(error);
+      job.text = '创建失败';
+      recordAccountOutcome(job.entry, {status: 'error', error: job.error}, job.requestedMethod);
+    }
+  }));
+  renderBatchJobs();
+  updateBatchAggregate();
+  if (batchJobs.some(job => job.jobId && !isTerminalJobStatus(job.status)) && activeRunMode === 'batch') {
+    clearInterval(batchPollTimer);
+    await pollBatch();
+    if (activeRunMode === 'batch') batchPollTimer = setInterval(pollBatch, 1200);
+  }
+}
+
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (activeRunMode) return;
+  await startSingleCheckout();
 });
 
 $('cancelButton').addEventListener('click', async () => {
   if(!jobId) return;
+  const currentJobId = jobId;
+  clearInterval(pollTimer);
   setRunning(false);
   setProgress(100,'任务已停止','cancelled');
   await fetch('/api/checkout-cancel',{
-    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:jobId})
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:currentJobId})
   });
 });
-$('copyResult').addEventListener('click', async () => { await navigator.clipboard.writeText($('resultValue').value || ''); const old=$('copyResult').textContent; $('copyResult').textContent='已复制'; setTimeout(()=>$('copyResult').textContent=old,1200); });
+
+$('batchCancelButton')?.addEventListener('click', async () => {
+  const pending = batchJobs.filter(job => job.jobId && !isTerminalJobStatus(job.status));
+  if (!pending.length) return;
+  clearInterval(batchPollTimer);
+  batchPollTimer = 0;
+  await Promise.all(pending.map(job => cancelBatchJob(job)));
+});
+
+$('copyResult').addEventListener('click', async () => {
+  const value = $('resultValue').value || '';
+  try{ await navigator.clipboard.writeText(value); }catch{ $('resultValue').select(); document.execCommand?.('copy'); }
+  const old=$('copyResult').textContent;
+  $('copyResult').textContent='已复制';
+  setTimeout(()=>$('copyResult').textContent=old,1200);
+});
 
 function applyTheme(dark){
   document.documentElement.classList.toggle('dark',dark);
@@ -780,4 +2232,7 @@ $('themeToggle').addEventListener('click',()=>applyTheme(!document.documentEleme
 initializeProxyAsnRecommendations();
 initializeBillingProfiles();
 initializeProxyProfiles();
+initializeAccountManager();
+initializeCollapsibleSections();
 syncFields(true);
+void loadTaskLimits();

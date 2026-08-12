@@ -39,6 +39,7 @@
 - 支持停止任务、进度展示、精简前端日志和完整后台日志。
 - 支持支付二维码、跳转链接、倒计时和结果复制。
 - 深色/浅色主题，以及桌面端和手机端响应式布局。
+- 提供受密码保护的 `/manage` 管理中心，维护代理池、账单档案、国家 ASN、成功节点和日志。
 
 ## 支付路径
 
@@ -56,6 +57,8 @@
 ```text
 pay153-checkout-link/
 ├─ app.py                       # Flask API、任务队列、限流与入口
+├─ manage_store.py              # SQLite 管理存储、加密与脱敏
+├─ manage_defaults.py           # 国家 ASN 推荐默认值
 ├─ provider_checkout.py         # Checkout、地区、账单与支付提供商流程
 ├─ stripe_checkout.py           # Stripe 初始化、金额、确认与跳转处理
 ├─ billing_address_resolver.py  # 在线地图及账单地址解析
@@ -68,6 +71,9 @@ pay153-checkout-link/
 ├─ static/
 │  ├─ index.html                # 提链控制台
 │  ├─ app.js                    # 前端任务与交互逻辑
+│  ├─ manage.html               # 管理中心
+│  ├─ manage.js                 # 管理中心交互
+│  ├─ manage.css                # 管理中心样式
 │  └─ styles.css                # 主界面样式
 ├─ docs/screenshots/            # README 截图
 ├─ requirements.txt
@@ -121,8 +127,13 @@ cp .env.example .env
 | `PAY153_IP_RPM` | 单 IP 每分钟任务上限 |
 | `PAY153_LOG_DIR` | 完整后台日志目录 |
 | `PAY153_LEGACY_BASE` | 旧服务兼容地址，可选 |
-| `PAY153_PROXY_PRE_PROXY` | SOCKS 前置代理，默认 `socks5h://127.0.0.1:9697`；留空可关闭 |
+| `PAY153_PROXY_PRE_PROXY` | 代理池 SOCKS 前置代理，默认 `socks5://127.0.0.1:9697`；留空可关闭 |
 | `PAYPAL_APPROVE_POLL_ATTEMPTS` | PayPal 审批后等待跳转地址的轮询次数，默认 6，范围 1-12 |
+| `PAY153_MANAGE_PASSWORD` | 管理中心密码；为空时 `/manage` 的管理 API 保持关闭 |
+| `PAY153_SESSION_SECRET` | Flask 登录会话密钥，生产环境建议固定设置 |
+| `PAY153_MANAGE_ENCRYPTION_KEY` | 管理数据库的 Fernet 密钥；为空时自动生成本地密钥文件 |
+| `PAY153_MANAGE_DB` | 管理数据库路径，默认 `data/pay153_manage.sqlite3` |
+| `PAY153_MANAGE_KEY_FILE` | 自动生成的 Fernet 密钥路径，默认 `data/.manage.key` |
 
 ## 代理池
 
@@ -140,6 +151,18 @@ socks5://username:password@host:port
 当前国家/地区的 ASN 推荐顺序会保存到浏览器本地键 `pay153.proxy_asn_recommendations.v1`，用于选择参考；它不会自动修改或重排代理池里的实际 IP。
 
 代理池采用两跳链路：本地 SOCKS5 `PAY153_PROXY_PRE_PROXY` 是第一跳，代理池中的每条代理是最终出口。程序通过 curl 的 `PRE_PROXY` 建立到代理池节点的连接，因此不会把本地 9697 误当成地区出口。9697 必须支持 SOCKS5 并允许连接到代理池节点；如果本地代理服务不可用，所有代理池检测都会失败。设置 `PAY153_PROXY_PRE_PROXY=` 可恢复代理池直连。
+
+## 管理中心
+
+设置 `PAY153_MANAGE_PASSWORD` 后访问 `/manage`。管理中心仍和当前 Flask 服务放在一起，数据落到本地 SQLite，不额外拆分服务：
+
+- **代理池**：按支付方式、国家和入口/支付出口用途维护，Gopay 保持两池模型；
+- **账单档案**：维护 `支付方式:国家` 档案，例如 `gopay:ID`；
+- **国家 / ASN**：保存地区推荐顺序，仅作为参考，不会自动重排实际代理；
+- **成功节点**：记录任务成功后的账号哈希、地区、入口/支付出口 IP 和任务信息；
+- **任务日志**：按日期、Job ID 和关键词查看已脱敏日志。
+
+工作台的代理、账单和 ASN 配置仍保存在浏览器 localStorage。管理中心不会自动上传这些数据，只有点击“导入浏览器配置”并确认后才会写入本地数据库。Token 不在导入范围内；代理凭据、账单字段和成功链接在管理库中使用 Fernet 加密，列表默认脱敏。`data/.manage.key` 或自定义 `PAY153_MANAGE_ENCRYPTION_KEY` 必须像密码一样保管。
 
 ## 生产部署
 
