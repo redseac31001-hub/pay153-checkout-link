@@ -16,12 +16,25 @@ const state = {
   asn: [],
   accounts: [],
   successes: [],
-  activeSection: 'overview'
+  activeSection: 'overview',
+  activeAccountId: '',
+  selectedAccountIds: new Set(),
+  accountSequence: 0,
+  detectionJobs: [],
+  detectionRunning: false
 };
+const revealedManageEmailIds = new Set();
 
 function text(value, fallback = '—') {
   const output = String(value ?? '').trim();
   return output || fallback;
+}
+
+function manageAccountEmail(item) {
+  const email = String(item?.email || '').trim();
+  if (email) return email;
+  const label = String(item?.label || '').trim();
+  return label.includes('@') ? label : '';
 }
 
 function makeCell(value, className = '') {
@@ -118,6 +131,48 @@ function accountMethods(value) {
   }, {});
 }
 
+function normalizeAccountProtocol(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['oaics', 'cs', 'unknown'].includes(normalized) ? normalized : 'unknown';
+}
+
+function accountProtocols(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.entries(value).slice(0, 100).reduce((result, [key, raw]) => {
+    if (!raw || typeof raw !== 'object') return result;
+    const country = String(raw.country || '').trim().toUpperCase().slice(0, 8);
+    const currency = String(raw.currency || '').trim().toUpperCase().slice(0, 8);
+    const checkedAtRaw = Number(raw.checkedAt || raw.checked_at || 0);
+    if (!country || !currency || !checkedAtRaw) return result;
+    result[String(key).slice(0, 80)] = {
+      protocol: normalizeAccountProtocol(raw.protocol),
+      country,
+      currency,
+      checkedAt: checkedAtRaw < 100000000000 ? checkedAtRaw * 1000 : checkedAtRaw,
+      baseline: Boolean(raw.baseline),
+      source: String(raw.source || 'checkout').slice(0, 40),
+      paymentMethods: accountMethods(raw.paymentMethods || raw.payment_method_types)
+    };
+    return result;
+  }, {});
+}
+
+function accountProtocolView(item, now = Date.now()) {
+  const records = accountProtocols(item?.checkoutProtocols);
+  const exactKey = `paypal:${item?.lastCountry || 'DE'}:${item?.lastCurrency || 'EUR'}`;
+  const record = records[exactKey] || records['paypal:DE:EUR'];
+  if (!record || now - Number(record.checkedAt || 0) > 24 * 60 * 60 * 1000) {
+    return {protocol: 'unknown', label: '待检测', scope: '—', tone: 'neutral'};
+  }
+  const protocol = normalizeAccountProtocol(record.protocol);
+  return {
+    protocol,
+    label: protocol === 'oaics' ? 'OAICS' : protocol === 'cs' ? 'CS' : '未知',
+    scope: `${record.country}/${record.currency}`,
+    tone: protocol === 'oaics' ? 'protocol-oaics' : protocol === 'cs' ? 'protocol-cs' : 'neutral'
+  };
+}
+
 function accountPromoView(status) {
   return {
     supported: ['支持', 'good'],
@@ -157,6 +212,8 @@ function localAccountList() {
   const list = Array.isArray(payload?.accounts) ? payload.accounts : [];
   return list.filter(item => item && typeof item === 'object').map(item => ({
     id: String(item.id || ''),
+    raw: String(item.raw || item.token || '').trim(),
+    token: String(item.token || item.raw || '').trim(),
     label: String(item.label || item.email || item.accountId || '').trim(),
     email: String(item.email || '').trim(),
     accountId: String(item.accountId || '').trim(),
@@ -166,9 +223,15 @@ function localAccountList() {
     promoStatus: ['supported', 'unsupported', 'unknown'].includes(item.promoStatus) ? item.promoStatus : 'unknown',
     promoReason: String(item.promoReason || '').slice(0, 240),
     paymentMethods: accountMethods(item.paymentMethods),
+    checkoutProtocols: accountProtocols(item.checkoutProtocols),
     riskStatus: ['clear', 'rejected', 'cooldown', 'blocked', 'frozen', 'unknown'].includes(item.riskStatus) ? item.riskStatus : 'unknown',
     riskReason: String(item.riskReason || '').slice(0, 240),
     cooldownUntil: Number(item.cooldownUntil || 0),
+    consecutiveDeclines: Number(item.consecutiveDeclines || 0),
+    consecutiveBlocks: Number(item.consecutiveBlocks || 0),
+    frozenAt: Number(item.frozenAt || 0),
+    updatedAt: Number(item.updatedAt || 0),
+    lastError: String(item.lastError || '').slice(0, 240),
     lastStatus: String(item.lastStatus || '').slice(0, 40),
     lastLinkType: String(item.lastLinkType || '').slice(0, 40),
     lastCountry: String(item.lastCountry || '').trim().toUpperCase().slice(0, 8),
@@ -200,6 +263,26 @@ function renderAccounts(items) {
   table.replaceChildren();
   items.forEach(item => {
     const row = document.createElement('tr');
+    row.dataset.id = item.id;
+    row.classList.toggle('is-active-account', item.id === state.activeAccountId);
+    const selectCell = document.createElement('td');
+    selectCell.className = 'account-select-cell';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'manage-account-check';
+    checkbox.checked = state.selectedAccountIds.has(item.id);
+    checkbox.disabled = !manageAccountCanBatch(item);
+    checkbox.setAttribute('aria-label', `选择 ${item.label || item.email || item.accountId} 批量检测或并发提链`);
+    checkbox.addEventListener('click', event => event.stopPropagation());
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) state.selectedAccountIds.add(item.id);
+      else state.selectedAccountIds.delete(item.id);
+      persistManageAccounts();
+      updateManageAccountControls();
+      renderAccounts(state.accounts.filter(accountMatchesFilters));
+    });
+    selectCell.append(checkbox);
+
     const identity = document.createElement('td');
     const title = document.createElement('strong');
     title.className = 'account-manage-title';
@@ -208,6 +291,21 @@ function renderAccounts(items) {
     identityMeta.className = 'subtle';
     identityMeta.textContent = item.accountId ? `ID ${maskLocalAccount(item.accountId)}` : text(item.kind, 'Token');
     identity.append(title, identityMeta);
+    const email = manageAccountEmail(item);
+    if (revealedManageEmailIds.has(item.id)) {
+      const emailValue = document.createElement('div');
+      emailValue.className = 'account-plain-email';
+      emailValue.textContent = email || '未从 Token / Session 解析到邮箱';
+      identity.append(emailValue);
+    }
+
+    const protocol = accountProtocolView(item);
+    const protocolCell = document.createElement('td');
+    protocolCell.append(makeStatusPill(protocol.label, protocol.tone));
+    const protocolScope = document.createElement('div');
+    protocolScope.className = 'account-status-note';
+    protocolScope.textContent = protocol.scope === '—' ? 'PayPal DE/EUR' : protocol.scope;
+    protocolCell.append(protocolScope);
 
     const expiry = accountExpiryView(item.exp);
     const expiryCell = document.createElement('td');
@@ -285,18 +383,661 @@ function renderAccounts(items) {
     sourceMeta.textContent = item.lastJobId ? `Job ${item.lastJobId}` : 'Token 仅保存在本机';
     sourceCell.append(sourceMeta);
 
-    row.append(identity, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell);
+    const emailButton = makeButton(revealedManageEmailIds.has(item.id) ? '隐藏邮箱' : '查看邮箱', 'toggle-email');
+    emailButton.disabled = !email;
+    emailButton.title = email ? '仅在当前管理页面展开完整邮箱' : '当前账号没有可展示的邮箱';
+    const actions = makeActions(
+      emailButton,
+      makeButton('使用', 'use-account'),
+      makeButton('检测', 'detect-account'),
+      makeButton('移除', 'remove-account', true)
+    );
+    row.append(selectCell, identity, protocolCell, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell, actions);
     table.append(row);
   });
   setTableState('accountTable', 'accountEmpty', items.length, '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');
   const riskCount = state.accounts.filter(item => ['rejected', 'cooldown', 'blocked', 'frozen'].includes(item.riskStatus)).length;
-  if ($('accountListMeta')) $('accountListMeta').textContent = `${items.length} 个账号 · ${riskCount} 个需要关注`;
+  if ($('accountListMeta')) $('accountListMeta').textContent = `${items.length} 个账号 · 已选 ${manageSelectedAccounts().length} · ${riskCount} 个需要关注`;
   if ($('statAccounts')) $('statAccounts').textContent = text(state.accounts.length, '0');
   if ($('statAccountRisk')) $('statAccountRisk').textContent = riskCount ? `${riskCount} 个需要关注` : '暂无拒绝 / 冷却信号';
 }
 
 function renderFilteredAccounts() {
   renderAccounts(state.accounts.filter(accountMatchesFilters));
+}
+
+function manageAccountCanBatch(item, now = Date.now()) {
+  return Boolean(
+    item?.raw
+    && (!item.exp || Number(item.exp) * 1000 > now)
+    && !['cooldown', 'frozen'].includes(String(item.riskStatus || ''))
+  );
+}
+
+function manageSelectedAccounts() {
+  return state.accounts.filter(item => state.selectedAccountIds.has(item.id) && manageAccountCanBatch(item));
+}
+
+function manageDecodeJwtPart(value) {
+  try {
+    const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+    return JSON.parse(decodeURIComponent(Array.from(window.atob(padded), character => `%${character.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')));
+  } catch (_) {
+    return {};
+  }
+}
+
+function manageJwtCandidate(value) {
+  return String(value || '').match(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/)?.[0] || '';
+}
+
+function splitManageAccountText(raw, source = '手动粘贴') {
+  const value = String(raw || '').trim();
+  if (!value) return [];
+  if (value.startsWith('{')) return [{text: value, source}];
+  const matches = [...value.matchAll(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g)]
+    .map(match => match[0])
+    .filter((token, index, list) => list.indexOf(token) === index);
+  if (matches.length) return matches.map((token, index) => ({text: token, source: `${source}#${index + 1}`}));
+  return value.split(/\r?\n/).map(item => item.trim()).filter(Boolean).map((item, index) => ({text: item, source: `${source}#${index + 1}`}));
+}
+
+function parseManageAccountRaw(raw, source = '手动粘贴') {
+  const value = String(raw || '').trim();
+  if (!value) throw new Error('内容为空');
+  let token = '';
+  let email = '';
+  let accountId = '';
+  let kind = 'token';
+  if (value.startsWith('{')) {
+    let data;
+    try { data = JSON.parse(value); } catch (_) { throw new Error('Session JSON 无法解析'); }
+    token = String(data.accessToken || data.access_token || data.token || '').trim();
+    const account = data.account && typeof data.account === 'object' ? data.account : {};
+    email = String(data.user?.email || account.email || data.email || '').trim();
+    accountId = String(account.id || data.account_id || '').trim();
+    kind = 'session';
+  }
+  token = token || manageJwtCandidate(value);
+  if (!token || token.split('.').length < 3) throw new Error('未识别到 Access Token');
+  const claims = manageDecodeJwtPart(token.split('.')[1]);
+  const auth = claims['https://api.openai.com/auth'] || {};
+  email = email || String(claims.email || claims['https://api.openai.com/profile']?.email || '').trim();
+  accountId = accountId || String(auth.chatgpt_account_id || claims.chatgpt_account_id || '').trim();
+  const exp = Number(claims.exp || 0) || 0;
+  const shortId = accountId ? accountId.slice(0, 8) : token.slice(0, 10);
+  return {
+    id: `acct_manage_${Date.now()}_${++state.accountSequence}`,
+    raw: value,
+    token,
+    email,
+    accountId,
+    exp,
+    kind,
+    source: source || (kind === 'session' ? '粘贴 Session' : '粘贴 Token'),
+    label: email || (accountId ? `账号 ${shortId}` : `${kind === 'session' ? 'Session' : 'Token'} ${shortId}`),
+    promoStatus: 'unknown',
+    promoReason: '',
+    paymentMethods: {},
+    checkoutProtocols: {},
+    riskStatus: 'unknown',
+    riskReason: '',
+    cooldownUntil: 0,
+    consecutiveDeclines: 0,
+    consecutiveBlocks: 0,
+    frozenAt: 0,
+    lastError: '',
+    lastStatus: '',
+    lastJobId: '',
+    lastLinkType: '',
+    lastCountry: '',
+    lastCurrency: '',
+    lastPaymentCountry: '',
+    lastResultUrl: '',
+    lastCheckedAt: 0,
+    updatedAt: Date.now()
+  };
+}
+
+function manageAccountIdentity(item) {
+  if (item?.accountId) return `id:${String(item.accountId).trim()}`;
+  if (item?.email) return `email:${String(item.email).trim().toLowerCase()}`;
+  return `token:${String(item?.token || item?.raw || '').trim().slice(0, 80)}`;
+}
+
+function upsertManageAccount(entry) {
+  const identity = manageAccountIdentity(entry);
+  const index = state.accounts.findIndex(item => manageAccountIdentity(item) === identity || (item.token && item.token === entry.token));
+  if (index >= 0) {
+    const previous = state.accounts[index];
+    state.accounts[index] = {
+      ...entry,
+      ...previous,
+      raw: entry.raw,
+      token: entry.token,
+      email: entry.email || previous.email,
+      accountId: entry.accountId || previous.accountId,
+      exp: entry.exp || previous.exp,
+      kind: entry.kind || previous.kind,
+      source: entry.source || previous.source,
+      label: previous.label || entry.label,
+      updatedAt: Date.now()
+    };
+    return {entry: state.accounts[index], added: false};
+  }
+  state.accounts.push(entry);
+  return {entry, added: true};
+}
+
+function persistManageAccounts() {
+  const payload = {
+    version: 1,
+    activeId: state.activeAccountId || '',
+    selectedIds: [...state.selectedAccountIds],
+    accounts: state.accounts.map(item => ({
+      id: item.id,
+      raw: item.raw || '',
+      token: item.token || '',
+      email: item.email || '',
+      accountId: item.accountId || '',
+      exp: Number(item.exp || 0),
+      kind: item.kind || 'token',
+      source: item.source || '',
+      label: item.label || '',
+      cooldownUntil: Number(item.cooldownUntil || 0),
+      lastDeclineAt: Number(item.lastDeclineAt || 0),
+      consecutiveDeclines: Number(item.consecutiveDeclines || 0),
+      consecutiveBlocks: Number(item.consecutiveBlocks || 0),
+      frozenAt: Number(item.frozenAt || 0),
+      promoStatus: item.promoStatus || 'unknown',
+      promoReason: String(item.promoReason || '').slice(0, 240),
+      paymentMethods: accountMethods(item.paymentMethods),
+      checkoutProtocols: accountProtocols(item.checkoutProtocols),
+      riskStatus: item.riskStatus || 'unknown',
+      riskReason: String(item.riskReason || '').slice(0, 240),
+      lastError: String(item.lastError || '').slice(0, 240),
+      lastStatus: String(item.lastStatus || '').slice(0, 40),
+      lastJobId: String(item.lastJobId || '').slice(0, 120),
+      lastLinkType: String(item.lastLinkType || '').slice(0, 40),
+      lastCountry: String(item.lastCountry || '').trim().toUpperCase().slice(0, 8),
+      lastCurrency: String(item.lastCurrency || '').trim().toUpperCase().slice(0, 8),
+      lastPaymentCountry: String(item.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8),
+      lastResultUrl: String(item.lastResultUrl || '').slice(0, 2000),
+      lastCheckedAt: Number(item.lastCheckedAt || 0),
+      updatedAt: Number(item.updatedAt || Date.now())
+    }))
+  };
+  try {
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    setMessage($('manageAccountStatus'), `本机保存失败：${error.message || error}`, true);
+  }
+}
+
+function refreshManageAccountState() {
+  const payload = parseStorage(ACCOUNT_STORAGE_KEY) || {};
+  state.accounts = localAccountList();
+  state.activeAccountId = String(payload.activeId || '');
+  if (!state.accounts.some(item => item.id === state.activeAccountId)) {
+    state.activeAccountId = state.accounts[0]?.id || '';
+  }
+  const storedSelectedIds = Array.isArray(payload.selectedIds) ? payload.selectedIds.map(id => String(id)) : [];
+  state.selectedAccountIds = new Set(storedSelectedIds.filter(id => state.accounts.some(item => item.id === id)));
+  renderFilteredAccounts();
+  updateManageAccountControls();
+}
+
+function importManageAccountItems(items) {
+  let added = 0;
+  let updated = 0;
+  let failed = 0;
+  const errors = [];
+  Array.from(items || []).forEach(item => {
+    try {
+      const result = upsertManageAccount(parseManageAccountRaw(item.text, item.source));
+      if (result.added) added += 1;
+      else updated += 1;
+      state.activeAccountId = result.entry.id;
+    } catch (error) {
+      failed += 1;
+      errors.push(`${item.source || '内容'}：${error.message || error}`);
+    }
+  });
+  persistManageAccounts();
+  refreshManageAccountState();
+  const parts = [];
+  if (added) parts.push(`新增 ${added}`);
+  if (updated) parts.push(`更新 ${updated}`);
+  if (failed) parts.push(`失败 ${failed}`);
+  setMessage($('manageAccountStatus'), parts.length ? `${parts.join(' · ')} · 已保存到本机` : errors[0] || '没有可导入的账号', Boolean(failed && !added && !updated));
+}
+
+function importManagePastedAccounts() {
+  const raw = String($('manageAccountInput')?.value || '').trim();
+  if (!raw) {
+    setMessage($('manageAccountStatus'), '请先粘贴 AT 或 Session JSON', true);
+    $('manageAccountInput')?.focus();
+    return;
+  }
+  importManageAccountItems(splitManageAccountText(raw));
+  $('manageAccountInput').value = '';
+}
+
+async function importManageAccountFiles(fileList) {
+  const items = [];
+  for (const file of Array.from(fileList || [])) {
+    try {
+      const value = String(await file.text() || '').trim();
+      items.push(...splitManageAccountText(value, file.name));
+    } catch (error) {
+      items.push({text: '', source: `${file.name}（读取失败）`});
+    }
+  }
+  importManageAccountItems(items);
+}
+
+function useManageAccount(id) {
+  const item = state.accounts.find(account => account.id === id);
+  if (!item) return;
+  state.activeAccountId = id;
+  persistManageAccounts();
+  renderFilteredAccounts();
+  setMessage($('manageAccountStatus'), `已选用 ${maskLocalAccount(item.label)}；返回工作台即可提交`, false);
+}
+
+function toggleManageAccountEmail(id) {
+  const item = state.accounts.find(account => account.id === id);
+  if (!item || !manageAccountEmail(item)) return;
+  if (revealedManageEmailIds.has(id)) revealedManageEmailIds.delete(id);
+  else revealedManageEmailIds.add(id);
+  renderFilteredAccounts();
+}
+
+function removeManageAccount(id) {
+  const item = state.accounts.find(account => account.id === id);
+  if (!item || !window.confirm(`确认移除本机账号 ${maskLocalAccount(item.label)}？`)) return;
+  state.accounts = state.accounts.filter(account => account.id !== id);
+  state.selectedAccountIds.delete(id);
+  revealedManageEmailIds.delete(id);
+  if (state.activeAccountId === id) state.activeAccountId = state.accounts[0]?.id || '';
+  persistManageAccounts();
+  refreshManageAccountState();
+  setMessage($('manageAccountStatus'), `已移除 ${maskLocalAccount(item.label)}`);
+}
+
+function clearManageAccounts() {
+  if (state.accounts.length && !window.confirm('确认清空本机账号列表？Token 只会从当前浏览器 localStorage 移除。')) return;
+  state.accounts = [];
+  state.activeAccountId = '';
+  state.selectedAccountIds.clear();
+  revealedManageEmailIds.clear();
+  persistManageAccounts();
+  refreshManageAccountState();
+  setMessage($('manageAccountStatus'), '已清空本机账号列表');
+}
+
+function updateManageAccountControls() {
+  const selected = manageSelectedAccounts();
+  const detect = $('manageDetectSelected');
+  if (detect) {
+    detect.textContent = `批量检测选中（${selected.length}）`;
+    detect.disabled = selected.length < 1 || state.detectionRunning;
+  }
+  const current = $('manageDetectCurrent');
+  if (current) current.disabled = !state.accounts.some(item => item.id === state.activeAccountId && manageAccountCanBatch(item)) || state.detectionRunning;
+  const selectAll = $('manageSelectAll');
+  if (selectAll) {
+    const available = state.accounts.filter(manageAccountCanBatch);
+    const allSelected = available.length > 0 && available.every(item => state.selectedAccountIds.has(item.id));
+    selectAll.disabled = !available.length || state.detectionRunning;
+    selectAll.textContent = allSelected ? '取消全选' : '全选可用';
+  }
+}
+
+function manageProxyCandidates(kind) {
+  const enabled = state.proxies.filter(item => item.enabled !== false);
+  const preferred = enabled.filter(item => kind === 'exit' ? item.pool_kind === 'exit' : item.pool_kind !== 'exit');
+  return preferred.length ? preferred : enabled;
+}
+
+function renderManageProxyOptions() {
+  [['manageDetectEntryPool', 'entry'], ['manageDetectExitPool', 'exit']].forEach(([id, kind]) => {
+    const select = $(id);
+    if (!select) return;
+    const current = select.value;
+    select.replaceChildren();
+    const candidates = manageProxyCandidates(kind);
+    if (!candidates.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = kind === 'exit' ? '先维护支付出口池' : '先维护入口代理池';
+      select.append(option);
+      return;
+    }
+    candidates.forEach(item => {
+      const option = document.createElement('option');
+      option.value = String(item.id);
+      option.textContent = `${text(item.name)} · ${text(item.country, '??')} · ${item.pool_kind === 'exit' ? '出口' : '入口'} · ${item.proxy_count || 0} 条`;
+      option.selected = String(item.id) === current;
+      select.append(option);
+    });
+    if (!candidates.some(item => String(item.id) === current)) select.value = String(candidates[0].id);
+  });
+  const hint = $('manageDetectionStatus');
+  if (hint && !state.detectionRunning) {
+    hint.textContent = state.proxies.length ? '检测任务会使用已保存代理池，不会修改代理配置。' : '请先在“代理池”模块保存入口和支付出口代理。';
+  }
+  syncManageDetectionProxyMode();
+}
+
+function manageDetectionProxyMode() {
+  return $('manageDetectProxyMode')?.value || 'pool';
+}
+
+function syncManageDetectionProxyMode() {
+  const mode = manageDetectionProxyMode();
+  show($('manageDetectionPoolFields'), mode === 'pool');
+  show($('manageDetectionLocalFields'), mode === 'local');
+  show($('manageDetectionManualFields'), mode === 'manual');
+  const hint = $('manageDetectionStatus');
+  if (!hint || state.detectionRunning) return;
+  if (mode === 'local') {
+    hint.textContent = '本地代理会同时用于入口和支付出口，仅用于本次检测。';
+  } else if (mode === 'manual') {
+    hint.textContent = '手工代理列表仅用于本次检测；已保存代理池可在下方代理池模块编辑。';
+  } else {
+    hint.textContent = state.proxies.length ? '检测任务会使用已保存代理池，不会修改代理配置。' : '请先在“代理池”模块保存入口和支付出口代理。';
+  }
+}
+
+function setManageDetectionStatus(value, isError = false) {
+  setMessage($('manageDetectionStatus'), value, isError);
+}
+
+function manageDetectionTerminal(status) {
+  return ['done', 'error', 'cancelled'].includes(String(status || ''));
+}
+
+function manageDetectionStatusLabel(status) {
+  return {
+    creating: '创建中',
+    waiting: '等待创建窗口',
+    queued: '排队中',
+    running: '检测中',
+    done: '完成',
+    error: '失败',
+    cancelled: '已停止'
+  }[status] || '等待';
+}
+
+function renderManageDetectionJobs() {
+  const list = $('manageDetectionJobs');
+  if (!list) return;
+  list.replaceChildren();
+  list.hidden = !state.detectionJobs.length;
+  state.detectionJobs.forEach(job => {
+    const row = document.createElement('div');
+    row.className = `manage-detection-job is-${manageDetectionTerminal(job.status) ? job.status : 'running'}`;
+    const main = document.createElement('div');
+    main.className = 'manage-detection-job-main';
+    const title = document.createElement('b');
+    title.textContent = maskLocalAccount(job.label);
+    const detail = document.createElement('small');
+    detail.textContent = job.error || job.text || '等待检测';
+    const progress = document.createElement('div');
+    progress.className = 'manage-detection-progress';
+    const progressValue = document.createElement('i');
+    progressValue.style.width = `${Math.max(0, Math.min(100, Number(job.percent) || 0))}%`;
+    progress.append(progressValue);
+    main.append(title, detail, progress);
+    const side = document.createElement('span');
+    side.className = 'manage-detection-job-status';
+    side.textContent = manageDetectionStatusLabel(job.status);
+    row.append(main, side);
+    list.append(row);
+  });
+}
+
+function manageDetectionPayload(account, entryProxies, exitProxies) {
+  return {
+    token: account.raw || account.token,
+    plan: 'plus',
+    link_type: 'paypal',
+    country: 'DE',
+    currency: 'EUR',
+    entry_proxies: entryProxies,
+    exit_proxies: exitProxies,
+    billing_profile: null,
+    billing_selection: null,
+    retry_count: 2,
+    use_promo: false,
+    promo_campaign: '',
+    promo_code: '',
+    workspace_name: '',
+    workspace_id: '',
+    seat_quantity: 5,
+    price_interval: 'month',
+    credit_quantity: 13,
+    ideal_bank: '',
+    pix_tax_id: '',
+    pix_auto_kind: 'cpf',
+    detection_only: true,
+    detection_fixed_de: true
+  };
+}
+
+async function revealManageProxyPool(id) {
+  const response = await api(`/api/manage/proxy-pools/${encodeURIComponent(id)}?reveal=1`);
+  const item = response.item || response;
+  const proxies = Array.isArray(item.proxies) ? item.proxies.filter(Boolean) : [];
+  if (!proxies.length) throw new Error(`代理池“${text(item.name, id)}”没有可用线路`);
+  return proxies;
+}
+
+function manageDetectionProxyLines(value) {
+  return String(value || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+}
+
+function validateManageDetectionProxyLine(value, label, index) {
+  const raw = String(value || '').trim();
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(raw)) {
+    let parsed;
+    try { parsed = new window.URL(raw); } catch (_) { parsed = null; }
+    const protocols = ['http:', 'https:', 'socks4:', 'socks5:', 'socks5h:'];
+    if (!parsed || !parsed.hostname || !protocols.includes(parsed.protocol)) {
+      throw new Error(`${label}第 ${index + 1} 行不是有效的代理 URL`);
+    }
+    return raw;
+  }
+  if (!/^[^:\s]+:\d{1,5}(?::.*)?$/.test(raw)) {
+    throw new Error(`${label}第 ${index + 1} 行请填写 URL 或 host:port:用户名:密码`);
+  }
+  return raw;
+}
+
+function validateManageDetectionProxyLines(values, label) {
+  if (!values.length) throw new Error(`请填写${label}`);
+  return values.map((value, index) => validateManageDetectionProxyLine(value, label, index));
+}
+
+async function resolveManageDetectionProxies() {
+  const mode = manageDetectionProxyMode();
+  if (mode === 'local') {
+    const localProxy = String($('manageDetectLocalProxy')?.value || '').trim();
+    const [proxy] = validateManageDetectionProxyLines([localProxy], '本地代理');
+    return {entryProxies: [proxy], exitProxies: [proxy], label: '本地代理'};
+  }
+  if (mode === 'manual') {
+    const entryProxies = validateManageDetectionProxyLines(
+      manageDetectionProxyLines($('manageDetectManualEntryProxy')?.value),
+      '入口代理列表'
+    );
+    const exitProxies = validateManageDetectionProxyLines(
+      manageDetectionProxyLines($('manageDetectManualExitProxy')?.value),
+      '支付出口列表'
+    );
+    return {entryProxies, exitProxies, label: '手工代理列表'};
+  }
+  const entryPoolId = $('manageDetectEntryPool')?.value || '';
+  const exitPoolId = $('manageDetectExitPool')?.value || '';
+  if (!entryPoolId || !exitPoolId) {
+    throw new Error('协议检测需要入口代理池和支付出口池，请先在代理池模块保存配置。');
+  }
+  const [entryProxies, exitProxies] = await Promise.all([
+    revealManageProxyPool(entryPoolId),
+    revealManageProxyPool(exitPoolId)
+  ]);
+  return {entryProxies, exitProxies, label: '已保存代理池'};
+}
+
+function manageRecordDetectionOutcome(job, data) {
+  const item = state.accounts.find(account => account.id === job.accountId);
+  if (!item) return;
+  const result = data?.result && typeof data.result === 'object' ? data.result : {};
+  const now = Date.now();
+  item.lastCheckedAt = now;
+  item.lastJobId = String(job.jobId || '').slice(0, 120);
+  item.lastStatus = String(data?.status || job.status || '').slice(0, 40);
+  item.lastLinkType = 'paypal';
+  item.lastCountry = String(result.checkout_country || result.checkout_protocol_country || 'DE').trim().toUpperCase().slice(0, 8);
+  item.lastCurrency = String(result.checkout_currency || result.checkout_protocol_currency || 'EUR').trim().toUpperCase().slice(0, 8);
+  item.lastError = String(data?.error || '').slice(0, 240);
+  if (data?.status === 'done') {
+    const protocol = normalizeAccountProtocol(result.checkout_protocol);
+    const country = String(result.checkout_protocol_country || result.checkout_country || 'DE').trim().toUpperCase().slice(0, 8);
+    const currency = String(result.checkout_protocol_currency || result.checkout_currency || 'EUR').trim().toUpperCase().slice(0, 8);
+    item.checkoutProtocols = accountProtocols(item.checkoutProtocols);
+    item.checkoutProtocols[`paypal:${country}:${currency}`] = {
+      protocol,
+      country,
+      currency,
+      checkedAt: Number(result.checkout_protocol_checked_at || now),
+      baseline: Boolean(result.checkout_protocol_baseline),
+      source: String(result.checkout_protocol_source || 'manage').slice(0, 40),
+      paymentMethods: accountMethods(result.oaics_payment_method_types || result.payment_method_types || [])
+    };
+    item.paymentMethods = accountMethods(item.paymentMethods);
+    if (protocol === 'oaics' && result.oaics_paypal_available === true) item.paymentMethods.paypal = 'supported';
+    item.riskStatus = item.riskStatus === 'frozen' ? 'frozen' : 'clear';
+    item.riskReason = item.riskStatus === 'frozen' ? item.riskReason : '最近一次协议检测完成，未发现拒绝信号';
+    item.lastError = '';
+    job.text = `协议 ${protocol.toUpperCase()} · ${country}/${currency}`;
+  } else {
+    const error = String(data?.error || job.error || '协议检测失败');
+    item.riskStatus = /account_(?:blocked|banned|suspended|restricted)|账号.*(?:封禁|冻结|拒绝)/i.test(error) ? 'blocked' : item.riskStatus;
+    item.riskReason = error.slice(0, 240);
+    item.lastError = error.slice(0, 240);
+  }
+  item.updatedAt = now;
+  persistManageAccounts();
+  refreshManageAccountState();
+}
+
+async function createManageDetectionJob(job, body) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    job.status = 'creating';
+    job.text = '正在提交协议检测';
+    renderManageDetectionJobs();
+    const response = await fetch('/api/checkout-detect', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 429) {
+      const retryAfter = Math.max(1, Number(response.headers?.get?.('Retry-After') || payload.retry_after) || 60);
+      job.status = 'waiting';
+      job.text = `创建频率受限，${retryAfter} 秒后重试`;
+      renderManageDetectionJobs();
+      await new Promise(resolve => window.setTimeout(resolve, retryAfter * 1000));
+      continue;
+    }
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    job.jobId = String(payload.job_id || '');
+    if (!job.jobId) throw new Error('服务未返回检测任务 ID');
+    job.status = 'queued';
+    job.percent = Number(payload.queue_position) > 0 ? 2 : 3;
+    job.text = Number(payload.queue_position) > 0 ? `已排队 · 前方 ${payload.queue_position - 1} 个任务` : '等待检测';
+    renderManageDetectionJobs();
+    return;
+  }
+  throw new Error('连续多次触发创建频率限制，请稍后再试');
+}
+
+async function pollManageDetectionJob(job) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    const data = await api(`/api/checkout-progress?job_id=${encodeURIComponent(job.jobId)}`);
+    job.status = String(data.status || job.status);
+    job.percent = Number(data.percent) || 0;
+    job.text = String(data.text || '正在检测');
+    job.error = String(data.error || '');
+    if (manageDetectionTerminal(job.status)) {
+      if (job.status === 'error') job.error = job.error || '协议检测失败';
+      manageRecordDetectionOutcome(job, data);
+      renderManageDetectionJobs();
+      return;
+    }
+    renderManageDetectionJobs();
+    await new Promise(resolve => window.setTimeout(resolve, 1200));
+  }
+  throw new Error('协议检测轮询超时');
+}
+
+async function startManageProtocolDetection(accountIds) {
+  if (state.detectionRunning) return;
+  const accounts = state.accounts.filter(item => accountIds.includes(item.id) && manageAccountCanBatch(item));
+  if (!accounts.length) {
+    setManageDetectionStatus('请先选择一个有效账号，或点击“使用”设为当前账号。', true);
+    return;
+  }
+  let detectionProxies;
+  try {
+    detectionProxies = await resolveManageDetectionProxies();
+  } catch (error) {
+    setManageDetectionStatus(error.message || String(error), true);
+    return;
+  }
+  state.detectionRunning = true;
+  state.detectionJobs = accounts.map(account => ({
+    accountId: account.id,
+    label: account.label || account.email || account.accountId,
+    jobId: '',
+    status: 'creating',
+    percent: 0,
+    text: '等待创建',
+    error: ''
+  }));
+  renderManageDetectionJobs();
+  updateManageAccountControls();
+  setManageDetectionStatus(`正在检测 ${accounts.length} 个账号，使用${detectionProxies.label}；结果会自动写回本机账号库。`);
+  try {
+    for (const job of state.detectionJobs) {
+      const account = state.accounts.find(item => item.id === job.accountId);
+      if (!account) continue;
+      try {
+        await createManageDetectionJob(job, manageDetectionPayload(account, detectionProxies.entryProxies, detectionProxies.exitProxies));
+        await pollManageDetectionJob(job);
+      } catch (error) {
+        job.status = 'error';
+        job.percent = 100;
+        job.error = error.message || String(error);
+        job.text = '检测失败';
+        manageRecordDetectionOutcome(job, {status: 'error', error: job.error});
+        renderManageDetectionJobs();
+      }
+    }
+    const done = state.detectionJobs.filter(job => job.status === 'done').length;
+    const failed = state.detectionJobs.length - done;
+    setManageDetectionStatus(`协议检测结束：${done} 个完成${failed ? ` · ${failed} 个失败` : ''}。` , Boolean(failed));
+  } catch (error) {
+    setManageDetectionStatus(error.message || String(error), true);
+  } finally {
+    state.detectionRunning = false;
+    updateManageAccountControls();
+    renderManageDetectionJobs();
+  }
 }
 
 async function api(path, options = {}) {
@@ -572,6 +1313,7 @@ async function loadSummary() {
 async function loadProxies() {
   state.proxies = (await api('/api/manage/proxy-pools')).items || [];
   renderProxies(state.proxies);
+  renderManageProxyOptions();
 }
 
 async function loadBilling() {
@@ -595,8 +1337,7 @@ async function loadAsn() {
 }
 
 function loadAccounts() {
-  state.accounts = localAccountList();
-  renderFilteredAccounts();
+  refreshManageAccountState();
 }
 
 async function loadSuccesses() {
@@ -799,6 +1540,16 @@ async function deleteRecord(kind, id) {
 }
 
 function bindTableActions() {
+  $('accountTable').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+    const id = button.closest('tr')?.dataset.id;
+    if (!id) return;
+    if (button.dataset.action === 'use-account') useManageAccount(id);
+    if (button.dataset.action === 'toggle-email') toggleManageAccountEmail(id);
+    if (button.dataset.action === 'detect-account') void startManageProtocolDetection([id]);
+    if (button.dataset.action === 'remove-account') removeManageAccount(id);
+  });
   $('proxyTable').addEventListener('click', (event) => {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
@@ -854,6 +1605,30 @@ function bindEvents() {
     $(id)?.addEventListener('input', renderFilteredAccounts);
     $(id)?.addEventListener('change', renderFilteredAccounts);
   });
+  $('manageImportPaste')?.addEventListener('click', importManagePastedAccounts);
+  $('manageAccountFileInput')?.addEventListener('change', async (event) => {
+    try { await importManageAccountFiles(event.target.files); }
+    finally { event.target.value = ''; }
+  });
+  $('manageSelectAll')?.addEventListener('click', () => {
+    const available = state.accounts.filter(manageAccountCanBatch);
+    const allSelected = available.length > 0 && available.every(item => state.selectedAccountIds.has(item.id));
+    available.forEach(item => {
+      if (allSelected) state.selectedAccountIds.delete(item.id);
+      else state.selectedAccountIds.add(item.id);
+    });
+    persistManageAccounts();
+    renderFilteredAccounts();
+    updateManageAccountControls();
+  });
+  $('manageClearAll')?.addEventListener('click', clearManageAccounts);
+  $('manageDetectCurrent')?.addEventListener('click', () => {
+    if (state.activeAccountId) void startManageProtocolDetection([state.activeAccountId]);
+  });
+  $('manageDetectSelected')?.addEventListener('click', () => {
+    void startManageProtocolDetection(manageSelectedAccounts().map(item => item.id));
+  });
+  $('manageDetectProxyMode')?.addEventListener('change', syncManageDetectionProxyMode);
   $('refreshAsn').addEventListener('click', loadAsn);
   $('refreshSuccesses').addEventListener('click', loadSuccesses);
   $('refreshLogs').addEventListener('click', loadLogs);
@@ -881,6 +1656,10 @@ async function bootstrap() {
     }
     showApp();
     await loadAll();
+    const requestedSection = String(window.location.hash || '').replace(/^#/, '');
+    if (requestedSection && qsa('.manage-nav-item').some(button => button.dataset.section === requestedSection)) {
+      activateSection(requestedSection);
+    }
   } catch (error) {
     showLogin(error.message);
   }

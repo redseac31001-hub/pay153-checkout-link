@@ -52,6 +52,27 @@ class _OaicsHttp(_Http):
 
 
 class CheckoutSessionIdTests(unittest.TestCase):
+    def test_oaics_billing_is_fixed_to_de_and_ignores_non_de_profile(self):
+        captured = {}
+
+        def fake_default_billing(country, email, **kwargs):
+            captured.update({"country": country, "email": email, **kwargs})
+            return {"address": {"country": country}}
+
+        with patch.object(app, "default_billing", side_effect=fake_default_billing):
+            country, billing = app.build_oaics_billing(
+                "oaics@example.test",
+                billing_profile={"country": "BR", "city": "Sao Paulo"},
+            )
+
+        self.assertEqual(country, "DE")
+        self.assertEqual(billing["address"]["country"], "DE")
+        self.assertEqual(captured["country"], "DE")
+        self.assertEqual(captured["email"], "oaics@example.test")
+        self.assertIsNone(captured["geo"])
+        self.assertIsNone(captured["billing_profile"])
+        self.assertTrue(captured["real_random"])
+
     def test_checkout_protocol_classification_prefers_stripe_session(self):
         self.assertEqual(
             app.checkout_protocol_from_payload({
@@ -91,6 +112,30 @@ class CheckoutSessionIdTests(unittest.TestCase):
             "checkout_protocol_hint_baseline": True,
             "checkout_protocol_hint_checked_at": now - app.CHECKOUT_PROTOCOL_HINT_TTL_SECONDS - 1,
         }, now=now))
+
+    def test_oaics_hint_forces_initial_checkout_billing_to_de_eur(self):
+        country, currency, source = app.resolve_oaics_checkout_region(
+            "BR",
+            "BRL",
+            "当前国家支持 PayPal（国家币种映射）",
+            oaics_hint_active=True,
+        )
+
+        self.assertEqual((country, currency), ("DE", "EUR"))
+        self.assertIn("OAICS", source)
+
+    def test_unmarked_checkout_keeps_proxy_derived_region(self):
+        result = app.resolve_oaics_checkout_region(
+            "BR",
+            "BRL",
+            "当前国家支持 PayPal（国家币种映射）",
+            oaics_hint_active=False,
+        )
+
+        self.assertEqual(
+            result,
+            ("BR", "BRL", "当前国家支持 PayPal（国家币种映射）"),
+        )
 
     def test_detection_result_is_not_written_as_a_success_link(self):
         class FakeStore:

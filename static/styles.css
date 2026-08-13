@@ -140,14 +140,36 @@ select{cursor:pointer}
 .account-import-status{color:var(--muted);font-size:11px;font-weight:600}
 .account-import-status.is-error{color:var(--danger)}
 .account-import-status.is-ok{color:var(--success)}
+.account-manager-gateway{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:0 0 10px;padding:12px 14px;border:1px solid rgba(109,74,255,.22);border-radius:13px;background:linear-gradient(100deg,rgba(109,74,255,.08),rgba(5,169,199,.045));}
+.account-manager-gateway>div{display:grid;gap:3px;min-width:0}
+.account-manager-gateway-main{flex:1}.account-manager-gateway-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:7px;flex:none}.account-manager-gateway-actions .account-toolbar-btn,.account-manager-gateway-actions .account-batch-button{white-space:nowrap}
+.account-manager-gateway b{color:var(--brand);font-size:11px;font-weight:800}
+.account-manager-gateway small{color:var(--muted);font-size:10px;line-height:1.4}
+.account-manager-link{flex:none;padding:8px 11px;border:1px solid rgba(109,74,255,.28);border-radius:9px;color:var(--brand);background:var(--surface);font-size:10px;font-weight:800;text-decoration:none;transition:.18s}
+.account-manager-link:hover{border-color:var(--brand);transform:translateY(-1px)}
+.account-workbench-selection{margin:0 0 10px}.account-workbench-selection-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 2px 7px}.account-selection-note{color:var(--faint);font-size:10px}.account-chip.is-batch-selected{border-color:rgba(5,169,199,.52);box-shadow:0 0 0 3px rgba(5,169,199,.08);background:rgba(5,169,199,.035)}
 .account-list{
-  display:flex;flex-direction:column;gap:8px;max-height:220px;overflow:auto;
-  margin:0 0 10px;padding:10px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2)
+  display:grid;gap:8px;max-height:240px;overflow:auto;
+  margin:0 0 10px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2)
 }
 .account-list-hint{margin:-3px 0 10px;color:var(--faint);font-size:10px;line-height:1.45}
+.account-protocol-group{display:grid;gap:5px;padding:7px 6px 6px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.42)}
+.account-protocol-group.is-oaics{border-color:rgba(109,74,255,.25)}
+.account-protocol-group.is-cs{border-color:rgba(5,169,199,.28)}
+.account-protocol-group.is-unknown{border-color:rgba(146,155,176,.38)}
+.account-protocol-group-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 2px 1px}
+.account-protocol-group-title{display:flex;align-items:center;gap:7px;min-width:0}
+.account-protocol-group-title>span{display:grid;gap:1px;min-width:0}
+.account-protocol-group-title b{font:800 10px var(--display);letter-spacing:.08em}
+.account-protocol-group-title small{color:var(--muted);font-size:9px;line-height:1.2}
+.account-protocol-group-marker{width:7px;height:7px;flex:0 0 auto;border-radius:50%;background:var(--faint);box-shadow:0 0 0 4px rgba(146,155,176,.10)}
+.is-oaics .account-protocol-group-marker{background:var(--brand);box-shadow:0 0 0 4px rgba(109,74,255,.10)}
+.is-cs .account-protocol-group-marker{background:var(--brand-2);box-shadow:0 0 0 4px rgba(5,169,199,.11)}
+.account-protocol-group-count{min-width:21px;padding:3px 6px;border-radius:999px;color:var(--muted);background:var(--surface-3);font:800 9px var(--mono);text-align:center}
+.account-protocol-group-list{display:grid;gap:5px}
 .account-chip{
   display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:8px 12px;align-items:center;
-  width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--surface);
+  width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:var(--surface);
   text-align:left;cursor:pointer;transition:.16s
 }
 .account-chip:hover{border-color:rgba(109,74,255,.45);transform:translateY(-1px)}
@@ -157,21 +179,22 @@ select{cursor:pointer}
 .account-chip.is-cooldown .account-chip-title{color:var(--warning)}
 .account-chip.is-frozen{border-color:rgba(214,73,92,.55);background:rgba(214,73,92,.08)}
 .account-chip.is-frozen .account-chip-title{color:var(--danger)}
-.account-batch-select{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:var(--surface-3);cursor:pointer}
+.account-batch-select{display:grid;place-items:center;width:22px;height:22px;border-radius:7px;background:var(--surface-3);cursor:pointer}
 .account-batch-select input{width:15px;height:15px;margin:0;accent-color:var(--brand);cursor:pointer}
 .account-batch-select input:disabled{cursor:not-allowed}
-.account-chip-main{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:4px;border:0;padding:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.account-chip-main{min-width:0;display:grid;grid-template-columns:minmax(120px,.72fr) minmax(0,1.28fr);grid-template-areas:"title summary" "meta summary";align-items:center;gap:2px 10px;border:0;padding:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .account-chip-main:focus-visible{outline:2px solid var(--brand);outline-offset:3px;border-radius:6px}
-.account-chip-title{color:var(--ink);font-size:12px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.account-chip-summary{display:flex;flex-wrap:wrap;gap:4px;max-width:100%}
-.account-chip-badge{display:inline-flex;align-items:center;max-width:100%;padding:3px 6px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:9px;font-weight:800;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.account-chip-title{grid-area:title;min-width:0;color:var(--ink);font-size:11px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-chip-summary{grid-area:summary;display:flex;flex-wrap:wrap;gap:3px;max-width:100%}
+.account-chip-badge{display:inline-flex;align-items:center;max-width:100%;padding:2px 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:8px;font-weight:800;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .account-chip-badge.good{border-color:rgba(28,168,121,.22);color:var(--success);background:rgba(28,168,121,.08)}
 .account-chip-badge.warn{border-color:rgba(245,158,66,.28);color:#c77420;background:rgba(245,158,66,.10)}
 .account-chip-badge.danger{border-color:rgba(214,73,92,.25);color:var(--danger);background:rgba(214,73,92,.09)}
-.account-chip-meta{color:var(--muted);font-size:10px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.account-chip-meta{grid-area:meta;min-width:0;color:var(--muted);font-size:9px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .account-chip-meta.is-expired,.account-chip.is-expired .account-chip-title{color:var(--danger)}
 .account-chip-meta.is-marked{color:var(--warning)}
-.account-chip-remove{padding:6px 10px;flex-shrink:0}
+.account-chip-actions{display:flex;gap:4px;flex-shrink:0}
+.account-chip-remove{padding:5px 7px;flex-shrink:0;font-size:10px}
 .account-chip-remove:hover{border-color:var(--danger);color:var(--danger)}
 .field-note,.inline-note{display:block;margin-top:7px;color:var(--muted);font-size:11px;line-height:1.6}
 .field-group{border:0;padding:0;margin:26px 0}
@@ -324,12 +347,14 @@ textarea::-webkit-scrollbar-corner,.log-box::-webkit-scrollbar-corner{background
 .dark textarea::placeholder,.dark input::placeholder{color:#58667e}
 .dark .token-field textarea{background:linear-gradient(145deg,#0c1421,#101a29)}
 .dark .account-list{background:#0d1522;border-color:#253249}.dark .account-list-hint{color:#718099}
+.dark .account-manager-gateway{border-color:rgba(138,114,255,.30);background:linear-gradient(100deg,rgba(138,114,255,.12),rgba(40,194,221,.06))}.dark .account-manager-link{background:#111b2b;color:#cbb8ff;border-color:rgba(138,114,255,.35)}
+.dark .account-protocol-group{background:rgba(17,27,43,.58)}.dark .account-protocol-group.is-oaics{border-color:rgba(138,114,255,.30)}.dark .account-protocol-group.is-cs{border-color:rgba(40,194,221,.30)}.dark .account-protocol-group.is-unknown{border-color:rgba(113,128,153,.42)}
 .dark .account-chip{background:#111b2b;border-color:#253249}
 .dark .account-chip.is-active{background:rgba(109,74,255,.12)}
 .dark .account-chip.is-marked:not(.is-active){background:rgba(245,158,66,.07)}
 .dark .account-import-btn,.dark .account-toolbar-btn,.dark .account-chip-remove,.dark .ghost-button{background:#111b2b;border-color:#253249;color:var(--ink)}
 .dark .account-import-btn{color:#cbb8ff;border-color:rgba(109,74,255,.35);background:rgba(109,74,255,.12)}
-.dark .account-batch-button{color:#fff}.dark .account-batch-select{background:#1a2537}
+.dark .account-batch-button{color:#fff}.dark .account-batch-select{background:#1a2537}.dark .account-chip.is-batch-selected{border-color:rgba(40,194,221,.55);background:rgba(40,194,221,.07)}
 .dark .collapsible-group{background:rgba(138,114,255,.045)}.dark .collapsible-summary:hover{background:rgba(138,114,255,.09)}.dark .collapsible-selection{background:rgba(138,114,255,.10);border-color:rgba(138,114,255,.24)}
 .dark .choice,.dark .rail{background:#111a29}
 .dark .choice:hover,.dark .rail:hover{background:#162133}
@@ -355,9 +380,11 @@ textarea::-webkit-scrollbar-corner,.log-box::-webkit-scrollbar-corner{background
 @media(max-width:780px){
   .topbar{height:64px;padding:0 14px}.brand-mark{width:38px;height:38px}.brand b{font-size:15px}.brand small{font-size:8px}.service-dot{display:none}.protocol-nav-link{display:none}
   .shell{padding:18px 13px 52px}.hero{min-height:0;padding:29px 23px;grid-template-columns:1fr;gap:26px;border-radius:25px}.hero h1{font-size:43px}.hero p{font-size:13px}.hero-board{grid-template-columns:repeat(3,1fr)}.hero-board>div{min-height:82px;padding:12px;display:flex;flex-direction:column;align-items:flex-start;justify-content:space-between}.hero-board strong{font-size:21px}.hero-board span{font-size:9px}
+  .account-manager-gateway{align-items:flex-start;flex-direction:column;gap:10px}.account-manager-gateway-main,.account-manager-gateway-actions{width:100%}.account-manager-gateway-actions{justify-content:stretch}.account-manager-gateway-actions>*{flex:1}.account-manager-link{width:100%;text-align:center}.account-chip-main{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"title summary" "meta summary";gap:2px 8px}.account-chip-summary{justify-content:flex-end}.account-chip-actions{gap:3px}
   .form-panel,.status-panel,.result-panel,.batch-panel{padding:19px}.panel{border-radius:22px}.plan-grid{grid-template-columns:1fr 1fr}.rail-grid{grid-template-columns:1fr 1fr;overflow:visible}.right-stack{grid-template-columns:1fr}.two-cols,.three-cols,.proxy-asn-list,.paypal-billing-grid{grid-template-columns:1fr}.workspace-grid{gap:15px}.proxy-block,.billing-block{padding:16px}.block-heading,.paypal-billing-heading{flex-direction:column}.block-tags{justify-content:flex-start}.proxy-foot,.billing-foot,.paypal-billing-status-row{align-items:stretch;flex-direction:column}.proxy-foot-actions{width:100%;flex-direction:column}.proxy-foot button,.billing-foot button,.paypal-billing-status-row button{width:100%;min-height:42px}.retry-setting{grid-template-columns:1fr;align-items:stretch}.proxy-pool-input{min-height:180px}.form-actions,.result-actions{flex-direction:column}.primary-button,.secondary-button{width:100%}.batch-job-row{grid-template-columns:1fr}.batch-job-side{display:flex;align-items:center;justify-content:space-between}.batch-job-link{max-width:100%}footer{padding:22px 16px 34px;flex-direction:column}.progress-orbit{width:195px;height:195px}
 }
 @media(max-width:480px){
   .hero h1{font-size:36px}.hero-board{grid-template-columns:1fr}.hero-board>div{min-height:64px;display:grid;grid-template-columns:1fr auto;grid-template-rows:auto auto}.hero-board strong{grid-row:1/3;grid-column:2}.rail-grid{grid-template-columns:1fr}.choice{min-height:70px}.panel-heading{align-items:flex-start}.quiet{display:none}
+  .account-protocol-group{padding:6px 5px}.account-chip{grid-template-columns:auto minmax(0,1fr);gap:6px 8px}.account-chip-actions{grid-column:2;justify-content:flex-end}.account-chip-main{grid-template-columns:1fr;grid-template-areas:"title" "summary" "meta";gap:3px}.account-chip-summary{justify-content:flex-start}
 }
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}

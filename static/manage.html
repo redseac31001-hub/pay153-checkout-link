@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 管理中心</title>
   <meta name="description" content="PAY.153 本地代理池、账单档案、ASN 推荐与成功节点管理中心">
-  <link rel="stylesheet" href="/static/styles.css?v=20260812-account-ui01">
-  <link rel="stylesheet" href="/static/manage.css?v=20260812-account-ui01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260813-account-workbench-ui01">
+  <link rel="stylesheet" href="/static/manage.css?v=20260813-account-workbench-ui01">
 </head>
 <body class="manage-page">
   <div class="paper-noise"></div>
@@ -34,7 +34,7 @@
         <button class="primary-button" type="submit"><span>登录管理中心</span><i>→</i></button>
       </form>
       <p id="manageLoginStatus" class="manage-message" role="status"></p>
-      <div class="security-note"><b>本地安全边界</b><span>Access Token 不会被此页面导入；代理凭据和账单字段由后端 Fernet 密钥加密。</span></div>
+      <div class="security-note"><b>本地安全边界</b><span>登录后账号模块才会读取浏览器本机 Token；Token 不进入管理数据库，代理凭据和账单字段由后端 Fernet 密钥加密。</span></div>
     </section>
 
     <div id="manageApp" hidden>
@@ -70,7 +70,7 @@
         <nav class="manage-nav" aria-label="管理中心导航">
           <div class="manage-nav-label">MODULES</div>
           <button class="manage-nav-item active" type="button" data-section="overview"><span>01</span> 总览</button>
-          <button class="manage-nav-item" type="button" data-section="accounts"><span>02</span> 账号状态</button>
+          <button class="manage-nav-item" type="button" data-section="accounts"><span>02</span> 账号与协议</button>
           <button class="manage-nav-item" type="button" data-section="proxies"><span>03</span> 代理池</button>
           <button class="manage-nav-item" type="button" data-section="billing"><span>04</span> 账单档案</button>
           <button class="manage-nav-item" type="button" data-section="addresses"><span>05</span> 内置地址库</button>
@@ -84,7 +84,7 @@
           <section class="manage-section active" data-panel="overview">
             <div class="section-heading"><div><div class="eyebrow"><span>01</span> OVERVIEW</div><h2>今天的操作面。</h2><p>先看数据是否齐全，再进入具体配置。</p></div><span class="section-status">LIVE LOCAL</span></div>
             <div class="overview-grid">
-              <article class="panel manage-card"><div class="card-kicker">DATA BOUNDARY</div><h3>哪些数据进入后台？</h3><p>成功任务只写入账号哈希、地区、代理出口和链接密文。Token 不进入 localStorage 导入接口，也不进入管理数据库。</p><div class="boundary-list"><span><i class="dot dot-good"></i>代理凭据 · 加密</span><span><i class="dot dot-good"></i>账单字段 · 加密</span><span><i class="dot dot-muted"></i>Token · 不导入</span><span><i class="dot dot-muted"></i>列表 · 默认脱敏</span></div></article>
+              <article class="panel manage-card"><div class="card-kicker">DATA BOUNDARY</div><h3>哪些数据进入后台？</h3><p>成功任务只写入账号哈希、地区、代理出口和链接密文。账号 Token 只保存在浏览器本机，不进入管理数据库。</p><div class="boundary-list"><span><i class="dot dot-good"></i>代理凭据 · 加密</span><span><i class="dot dot-good"></i>账单字段 · 加密</span><span><i class="dot dot-muted"></i>Token · 仅本机</span><span><i class="dot dot-muted"></i>列表 · 默认脱敏</span></div></article>
               <article class="panel manage-card"><div class="card-kicker">WORKFLOW</div><h3>推荐的维护顺序</h3><ol class="workflow-list"><li><b>01</b><span>先维护国家对应的代理池</span></li><li><b>02</b><span>再为支付方式选择账单档案</span></li><li><b>03</b><span>用成功节点和日志复盘线路</span></li></ol></article>
             </div>
             <div class="section-heading compact"><div><h3>最近成功节点</h3><p>仅展示已脱敏字段。</p></div><button class="text-button" type="button" data-jump="successes">查看全部 →</button></div>
@@ -92,8 +92,46 @@
           </section>
 
           <section class="manage-section" data-panel="accounts" hidden>
-            <div class="section-heading"><div><div class="eyebrow"><span>02</span> ACCOUNT STATUS</div><h2>账号状态列表。</h2><p>读取当前浏览器本机账号元数据，汇总有效期、优惠资格、支付方式和拒绝/冷却信号。</p></div><span class="section-status">LOCAL ONLY</span></div>
-            <div class="account-management-note panel"><strong>隐私边界</strong><span>本列表只读同源 localStorage 的脱敏状态；Access Token 不上传管理接口，也不在表格中展示。这里查看 Token 有效期和最近地区；支付方式未被接口明确返回时显示“未检测”；连续三次明确 block 会进入本机冻结。</span><a class="text-button" href="/">回工作台导入账号 →</a></div>
+            <div class="section-heading"><div><div class="eyebrow"><span>02</span> ACCOUNTS + PROTOCOLS</div><h2>账号与协议。</h2><p>在这里维护本机账号、检测 PayPal Checkout 协议，再回工作台提交任务。</p></div><span class="section-status">LOCAL ONLY</span></div>
+            <div class="account-management-note panel"><strong>隐私边界</strong><span>Access Token 只保存在当前浏览器同源 localStorage，不上传管理接口，也不进入管理数据库；管理中心只在本地页面中读取它来发起检测。表格默认只展示脱敏账号状态，邮箱可按行临时展开。</span><a class="text-button" href="/">打开工作台并发提链 →</a></div>
+            <div class="account-ops-grid">
+              <section class="panel account-ops-card">
+                <div class="account-ops-heading"><div><span class="section-index">A</span><div><h3>本机账号库</h3><p>粘贴、导入和选择要使用的账号。</p></div></div><span id="manageAccountStatus" class="form-status"></span></div>
+                <textarea id="manageAccountInput" class="account-import-textarea" autocomplete="off" spellcheck="false" placeholder="粘贴一个 AT、Session JSON，或每行一个 AT"></textarea>
+                <div class="account-ops-actions">
+                  <button id="manageImportPaste" class="primary-button" type="button"><span>导入粘贴内容</span><i>→</i></button>
+                  <label class="secondary-button account-file-button" for="manageAccountFileInput">导入 AT 文件</label>
+                  <input id="manageAccountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
+                  <button id="manageSelectAll" class="secondary-button" type="button">全选可用</button>
+                  <button id="manageClearAll" class="text-button danger-text" type="button">清空账号</button>
+                </div>
+                <p class="account-ops-hint">选择复选框后可批量检测，也会同步到工作台的并发提链选择；点击“使用”会把账号设为工作台的当前账号。</p>
+              </section>
+              <section class="panel account-ops-card account-detection-card">
+                <div class="account-ops-heading"><div><span class="section-index">P</span><div><h3>OAICS / CS 协议检测</h3><p>固定检测 DE / EUR PayPal Checkout，并记录协议到账号。</p></div></div><span class="protocol-detection-mark">DE / EUR</span></div>
+                <div class="manage-detection-source">
+                  <label class="field"><span>检测代理来源</span><select id="manageDetectProxyMode"><option value="pool">已保存代理池</option><option value="local">本地代理</option><option value="manual">手工编辑代理池</option></select></label>
+                </div>
+                <div id="manageDetectionPoolFields" class="form-grid form-grid-2 account-detection-fields">
+                  <label class="field"><span>入口代理池</span><select id="manageDetectEntryPool"><option value="">先维护入口代理池</option></select></label>
+                  <label class="field"><span>支付出口池</span><select id="manageDetectExitPool"><option value="">先维护支付出口池</option></select></label>
+                </div>
+                <div id="manageDetectionLocalFields" class="manage-detection-local-fields" hidden>
+                  <label class="field"><span>本地代理地址</span><input id="manageDetectLocalProxy" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:9697"></label>
+                  <p class="manage-detection-config-note">同一个本地代理会同时作为入口和支付出口，仅用于本次检测，不会写入代理池。</p>
+                </div>
+                <div id="manageDetectionManualFields" class="manage-detection-manual-fields" hidden>
+                  <div class="form-grid form-grid-2">
+                    <label class="field"><span>入口代理列表</span><textarea id="manageDetectManualEntryProxy" spellcheck="false" placeholder="每行一条，例如&#10;http://127.0.0.1:9697"></textarea></label>
+                    <label class="field"><span>支付出口列表</span><textarea id="manageDetectManualExitProxy" spellcheck="false" placeholder="每行一条，例如&#10;http://127.0.0.1:9697"></textarea></label>
+                  </div>
+                  <div class="manage-detection-manual-footer"><p class="manage-detection-config-note">支持 URL 或 host:port:用户名:密码格式；手工内容只用于本次检测。</p><button class="text-button" type="button" data-jump="proxies">进入代理池维护 / 新增 →</button></div>
+                </div>
+                <div class="account-detection-actions"><button id="manageDetectCurrent" class="primary-button" type="button"><span>检测当前账号</span><i>→</i></button><button id="manageDetectSelected" class="secondary-button" type="button" disabled>批量检测选中（0）</button></div>
+                <p id="manageDetectionStatus" class="account-ops-hint" role="status">检测任务会使用已保存代理池，不会修改代理配置。</p>
+                <div id="manageDetectionJobs" class="manage-detection-jobs" hidden></div>
+              </section>
+            </div>
             <div class="filter-bar panel">
               <label class="filter-wide"><span>搜索</span><input id="accountQuery" placeholder="邮箱、账号 ID、来源或任务"></label>
               <label><span>优惠</span><select id="accountPromoFilter"><option value="">全部</option><option value="supported">支持</option><option value="unsupported">不支持 / 未生效</option><option value="unknown">未检测</option></select></label>
@@ -101,8 +139,8 @@
               <label><span>支付方式</span><select id="accountMethodFilter"><option value="">全部</option><option value="paypal">PayPal</option><option value="gopay">Gopay</option><option value="ideal">iDEAL</option><option value="upi">UPI</option><option value="pix">PIX</option><option value="card">Card</option></select></label>
               <button id="refreshAccounts" class="secondary-button" type="button">刷新</button>
             </div>
-            <div class="section-heading compact"><div><h3>当前浏览器账号</h3><p>状态来自最近一次任务结果；“疑似封禁”仅表示响应出现明确账号封禁信号，不代表永久结论。</p></div><span id="accountListMeta" class="section-status">0 个账号</span></div>
-            <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>账号</th><th>有效期</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 地区</th><th>来源 / 任务</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
+            <div class="section-heading compact"><div><h3>当前浏览器账号</h3><p>协议检测结果按 DE/EUR 记录；“疑似封禁”仅表示响应出现明确账号封禁信号，不代表永久结论。</p></div><span id="accountListMeta" class="section-status">0 个账号</span></div>
+            <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>选择</th><th>账号</th><th>协议</th><th>有效期</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 地区</th><th>来源 / 任务</th><th>操作</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
           </section>
 
           <section class="manage-section" data-panel="proxies" hidden>
@@ -191,6 +229,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>管理中心只建议在受控的本地网络中开放。</p></footer>
-  <script src="/static/manage.js?v=20260812-account-ui01"></script>
+  <script src="/static/manage.js?v=20260813-account-workbench-ui01"></script>
 </body>
 </html>

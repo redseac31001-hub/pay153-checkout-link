@@ -1177,6 +1177,7 @@ function persistAccounts(){
   const payload = {
     version: 1,
     activeId: activeAccountId || '',
+    selectedIds: [...batchSelectedAccountIds],
     // 私有化本机明文存储；勿提交到 git / 勿同步到公网。
     accounts: accountEntries.map(entry => ({
       id: entry.id,
@@ -1218,6 +1219,7 @@ function persistAccounts(){
 function loadAccountsFromStorage(){
   accountEntries.length = 0;
   activeAccountId = '';
+  batchSelectedAccountIds.clear();
   try{
     const raw = localStorage.getItem(ACCOUNT_STORAGE_KEY);
     if (!raw) return;
@@ -1242,6 +1244,11 @@ function loadAccountsFromStorage(){
     const wanted = String(parsed?.activeId || '');
     if (wanted && accountEntries.some(item => item.id === wanted)) activeAccountId = wanted;
     else if (accountEntries.length) activeAccountId = accountEntries[0].id;
+    const storedSelectedIds = Array.isArray(parsed?.selectedIds) ? parsed.selectedIds.map(id => String(id)) : [];
+    const availableIds = new Set(accountEntries.filter(entry => accountCanBatch(entry)).map(entry => entry.id));
+    storedSelectedIds.forEach(id => {
+      if (availableIds.has(id)) batchSelectedAccountIds.add(id);
+    });
   }catch{
     accountEntries.length = 0;
     activeAccountId = '';
@@ -1267,6 +1274,12 @@ function getBatchSelectedAccounts(){
 
 function updateBatchControls(){
   const selectedCount = getBatchSelectedAccounts().length;
+  const gatewayHint = $('accountGatewaySelectionHint');
+  if (gatewayHint) {
+    gatewayHint.textContent = selectedCount
+      ? `已选 ${selectedCount} 个可用账号；每个账号独立创建任务，结果不会互相覆盖。`
+      : '选择的账号会从管理中心同步到这里，每个账号独立创建任务。';
+  }
   const batchButton = $('accountBatchRun');
   if (batchButton) {
     batchButton.textContent = `并发提链（${selectedCount}）`;
@@ -1325,6 +1338,8 @@ function accountProtocolView(entry, now=Date.now()){
   const protocol = record.protocol === 'oaics' ? 'OAICS' : record.protocol === 'cs' ? 'CS' : '未知';
   const scope = `${record.country}/${record.currency}`;
   return {
+    protocol: record.protocol,
+    scope,
     label: `协议 ${protocol} · ${scope}${record.baseline ? ' 基线' : ''}`,
     tone: record.protocol === 'unknown' ? 'neutral' : 'good'
   };
@@ -1396,121 +1411,175 @@ function renderAccountList(){
   }
   list.hidden = false;
   const now = Date.now();
+  const groupDefinitions = [
+    {key: 'oaics', label: 'OAICS', description: 'OpenAI Checkout', tone: 'oaics'},
+    {key: 'cs', label: 'CS', description: 'Stripe Checkout', tone: 'cs'},
+    {key: 'unknown', label: '待检测', description: '尚未识别协议', tone: 'unknown'}
+  ];
+  const groupedEntries = Object.fromEntries(groupDefinitions.map(group => [group.key, []]));
   selectionAccountEntries(now).forEach(entry => {
-    const cooling = isAccountInCooldown(entry, now);
-    const frozen = isAccountFrozen(entry);
-    const marked = accountHasMarker(entry, now);
-    const available = accountCanBatch(entry, now);
-    const row = document.createElement('div');
-    row.className = 'account-chip'
-      + (entry.id === activeAccountId ? ' is-active' : '')
-      + (entry.expired ? ' is-expired' : '')
-      + (cooling ? ' is-cooldown' : '')
-      + (frozen ? ' is-frozen' : '')
-      + (marked ? ' is-marked' : '');
-    row.dataset.accountId = entry.id;
-
-    const selectWrap = document.createElement('label');
-    selectWrap.className = 'account-batch-select';
-    selectWrap.title = available ? '加入并发提链' : (frozen ? '账号冻结中' : (cooling ? '账号冷却中' : '账号已过期'));
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.className = 'account-batch-check';
-    checkbox.checked = batchSelectedAccountIds.has(entry.id);
-    checkbox.disabled = !available;
-    checkbox.setAttribute('aria-label', `选择 ${entry.label} 并发提链`);
-    checkbox.addEventListener('click', event => event.stopPropagation());
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) batchSelectedAccountIds.add(entry.id);
-      else batchSelectedAccountIds.delete(entry.id);
-      updateBatchControls();
-    });
-    selectWrap.appendChild(checkbox);
-
-    const main = document.createElement('button');
-    main.type = 'button';
-    main.className = 'account-chip-main';
-    main.title = '点击选用此账号';
-    main.setAttribute('aria-pressed', String(entry.id === activeAccountId));
-    const title = document.createElement('span');
-    title.className = 'account-chip-title';
-    title.textContent = entry.label;
-    const summary = document.createElement('span');
-    summary.className = 'account-chip-summary';
-    const marker = accountMarkerView(entry, now);
-    summary.append(accountChipBadge(marker[0], marker[1]));
-    if (entry.promoStatus === 'supported') summary.append(accountChipBadge('优惠支持', 'good'));
-    if (entry.promoStatus === 'unsupported' && marker[0] !== '优惠未生效') summary.append(accountChipBadge('优惠未生效', 'warn'));
     const protocolView = accountProtocolView(entry, now);
-    if (protocolView) summary.append(accountChipBadge(protocolView.label, protocolView.tone));
-    const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
-      .filter(method => entry.paymentMethods[method] === 'supported');
-    if (supportedMethods.length) {
-      summary.append(accountChipBadge(`方式 ${supportedMethods.slice(0, 3).map(accountMethodLabel).join(' / ')}`, 'neutral'));
-    }
-    const lastRegion = [entry.lastCountry, entry.lastCurrency].filter(Boolean).join('/');
-    if (lastRegion) summary.append(accountChipBadge(`地区 ${lastRegion}`, 'neutral'));
-    const meta = document.createElement('span');
-    meta.className = 'account-chip-meta' + (marked ? ' is-marked' : '');
-    const bits = [entry.source];
-    if (entry.accountId) bits.push(`id ${entry.accountId.slice(0, 8)}`);
-    if (frozen) bits.push(`连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(entry.consecutiveBlocks || 0))} 次 block · 需手动解冻`);
-    else if (cooling) bits.push(`冷却剩余 ${formatCooldownRemaining(entry, now)} · 至 ${formatCooldownUntil(entry)}`);
-    meta.textContent = bits.filter(Boolean).join(' · ');
-    main.append(title, summary, meta);
-    main.addEventListener('click', () => selectAccount(entry.id));
+    const groupKey = protocolView?.protocol === 'oaics' || protocolView?.protocol === 'cs'
+      ? protocolView.protocol
+      : 'unknown';
+    groupedEntries[groupKey].push({entry, protocolView});
+  });
 
-    const actions = document.createElement('div');
-    actions.style.cssText = 'display:flex;gap:6px;flex-shrink:0';
-    if (frozen) {
-      const clearFreeze = document.createElement('button');
-      clearFreeze.type = 'button';
-      clearFreeze.className = 'account-chip-remove';
-      clearFreeze.textContent = '解冻';
-      clearFreeze.title = '仅清除本机冻结标记，不代表平台侧状态已恢复';
-      clearFreeze.addEventListener('click', (event) => {
+  groupDefinitions.forEach(group => {
+    const entries = groupedEntries[group.key];
+    if (!entries.length) return;
+
+    const section = document.createElement('section');
+    section.className = `account-protocol-group is-${group.tone}`;
+    const headingId = `account-protocol-group-${group.key}`;
+    section.setAttribute('aria-labelledby', headingId);
+
+    const heading = document.createElement('div');
+    heading.className = 'account-protocol-group-head';
+    const headingMain = document.createElement('div');
+    headingMain.className = 'account-protocol-group-title';
+    const marker = document.createElement('i');
+    marker.className = 'account-protocol-group-marker';
+    marker.setAttribute('aria-hidden', 'true');
+    const headingCopy = document.createElement('span');
+    const headingLabel = document.createElement('b');
+    headingLabel.id = headingId;
+    headingLabel.textContent = group.label;
+    const headingDescription = document.createElement('small');
+    headingDescription.textContent = group.description;
+    headingCopy.append(headingLabel, headingDescription);
+    headingMain.append(marker, headingCopy);
+    const count = document.createElement('span');
+    count.className = 'account-protocol-group-count';
+    count.textContent = `${entries.length}`;
+    heading.append(headingMain, count);
+
+    const groupList = document.createElement('div');
+    groupList.className = 'account-protocol-group-list';
+    entries.forEach(({entry, protocolView}) => {
+      const cooling = isAccountInCooldown(entry, now);
+      const frozen = isAccountFrozen(entry);
+      const marked = accountHasMarker(entry, now);
+      const available = accountCanBatch(entry, now);
+      const row = document.createElement('div');
+      row.className = 'account-chip'
+        + (entry.id === activeAccountId ? ' is-active' : '')
+        + (batchSelectedAccountIds.has(entry.id) ? ' is-batch-selected' : '')
+        + (entry.expired ? ' is-expired' : '')
+        + (cooling ? ' is-cooldown' : '')
+        + (frozen ? ' is-frozen' : '')
+        + (marked ? ' is-marked' : '');
+      row.dataset.accountId = entry.id;
+
+      const selectWrap = document.createElement('label');
+      selectWrap.className = 'account-batch-select';
+      selectWrap.title = available ? '加入并发提链' : (frozen ? '账号冻结中' : (cooling ? '账号冷却中' : '账号已过期'));
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.className = 'account-batch-check';
+      checkbox.checked = batchSelectedAccountIds.has(entry.id);
+      checkbox.disabled = !available;
+      checkbox.setAttribute('aria-label', `选择 ${entry.label} 并发提链`);
+      checkbox.addEventListener('click', event => event.stopPropagation());
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) batchSelectedAccountIds.add(entry.id);
+        else batchSelectedAccountIds.delete(entry.id);
+        persistAccounts();
+        updateBatchControls();
+      });
+      selectWrap.appendChild(checkbox);
+
+      const main = document.createElement('button');
+      main.type = 'button';
+      main.className = 'account-chip-main';
+      main.title = '点击选用此账号';
+      main.setAttribute('aria-pressed', String(entry.id === activeAccountId));
+      const title = document.createElement('span');
+      title.className = 'account-chip-title';
+      title.textContent = entry.label;
+      const summary = document.createElement('span');
+      summary.className = 'account-chip-summary';
+      const accountMarker = accountMarkerView(entry, now);
+      summary.append(accountChipBadge(accountMarker[0], accountMarker[1]));
+      if (entry.promoStatus === 'supported') summary.append(accountChipBadge('优惠支持', 'good'));
+      if (entry.promoStatus === 'unsupported' && accountMarker[0] !== '优惠未生效') {
+        summary.append(accountChipBadge('优惠未生效', 'warn'));
+      }
+      const supportedMethods = Object.keys(normalizeAccountPaymentMethods(entry.paymentMethods))
+        .filter(method => entry.paymentMethods[method] === 'supported');
+      if (supportedMethods.length) {
+        summary.append(accountChipBadge(`方式 ${supportedMethods.slice(0, 3).map(accountMethodLabel).join(' / ')}`, 'neutral'));
+      }
+      const lastRegion = [entry.lastCountry, entry.lastCurrency].filter(Boolean).join('/') || protocolView?.scope || '';
+      if (lastRegion) summary.append(accountChipBadge(`地区 ${lastRegion}`, 'neutral'));
+      const meta = document.createElement('span');
+      meta.className = 'account-chip-meta' + (marked ? ' is-marked' : '');
+      const bits = [entry.source];
+      if (entry.accountId) bits.push(`id ${entry.accountId.slice(0, 8)}`);
+      if (frozen) bits.push(`连续 ${Math.max(ACCOUNT_BLOCK_STREAK_LIMIT, Number(entry.consecutiveBlocks || 0))} 次 block · 需手动解冻`);
+      else if (cooling) bits.push(`冷却剩余 ${formatCooldownRemaining(entry, now)} · 至 ${formatCooldownUntil(entry)}`);
+      meta.textContent = bits.filter(Boolean).join(' · ');
+      main.append(title, summary, meta);
+      main.addEventListener('click', () => selectAccount(entry.id));
+
+      const actions = document.createElement('div');
+      actions.className = 'account-chip-actions';
+      if (frozen) {
+        const clearFreeze = document.createElement('button');
+        clearFreeze.type = 'button';
+        clearFreeze.className = 'account-chip-remove';
+        clearFreeze.textContent = '解冻';
+        clearFreeze.title = '仅清除本机冻结标记，不代表平台侧状态已恢复';
+        clearFreeze.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          clearAccountFreeze(entry.id);
+        });
+        actions.appendChild(clearFreeze);
+      } else if (cooling) {
+        const clearCd = document.createElement('button');
+        clearCd.type = 'button';
+        clearCd.className = 'account-chip-remove';
+        clearCd.textContent = '清冷却';
+        clearCd.title = '仅清除本机冷却标记，不会让支付侧风控消失';
+        clearCd.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          clearAccountCooldown(entry.id);
+        });
+        actions.appendChild(clearCd);
+      }
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'account-chip-remove';
+      remove.textContent = '移除';
+      remove.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        clearAccountFreeze(entry.id);
+        removeAccount(entry.id);
       });
-      actions.appendChild(clearFreeze);
-    } else if (cooling) {
-      const clearCd = document.createElement('button');
-      clearCd.type = 'button';
-      clearCd.className = 'account-chip-remove';
-      clearCd.textContent = '清冷却';
-      clearCd.title = '仅清除本机冷却标记，不会让支付侧风控消失';
-      clearCd.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        clearAccountCooldown(entry.id);
-      });
-      actions.appendChild(clearCd);
-    }
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'account-chip-remove';
-    remove.textContent = '移除';
-    remove.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      removeAccount(entry.id);
-    });
-    actions.appendChild(remove);
+      actions.appendChild(remove);
 
-    row.append(selectWrap, main, actions);
-    row.addEventListener('click', (event) => {
-      if (event.target.closest('button.account-chip-remove')) return;
-      selectAccount(entry.id);
+      row.append(selectWrap, main, actions);
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('button.account-chip-remove')) return;
+        selectAccount(entry.id);
+      });
+      groupList.appendChild(row);
     });
-    list.appendChild(row);
+    section.append(heading, groupList);
+    list.appendChild(section);
   });
   if ($('accountListHint')) {
     const markedCount = accountEntries.filter(entry => accountHasMarker(entry, now)).length;
+    const groupSummary = groupDefinitions
+      .filter(group => groupedEntries[group.key].length)
+      .map(group => `${group.label} ${groupedEntries[group.key].length}`)
+      .join(' · ');
     $('accountListHint').hidden = false;
     $('accountListHint').textContent = markedCount
-      ? `${accountEntries.length - markedCount} 个账号优先显示 · ${markedCount} 个已标记账号已排到后方`
-      : `${accountEntries.length} 个账号 · 点击账号行即可选用`;
+      ? `${groupSummary} · ${accountEntries.length - markedCount} 个账号优先显示 · ${markedCount} 个已标记账号已排到后方`
+      : `${groupSummary} · 点击账号行即可选用`;
   }
   if ($('tokenHint')) {
     const active = accountEntries.find(item => item.id === activeAccountId);
@@ -1948,6 +2017,7 @@ function initializeAccountManager(){
       if (allSelected) batchSelectedAccountIds.delete(entry.id);
       else batchSelectedAccountIds.add(entry.id);
     });
+    persistAccounts();
     renderAccountList();
     setAccountImportStatus(allSelected ? '已取消全部批量选择' : `已选择 ${available.length} 个可用账号`, 'ok');
   });

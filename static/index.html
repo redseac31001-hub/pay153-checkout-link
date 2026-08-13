@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 多通道提链控制台</title>
   <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Gopay、Team 与 Codex 空间提链工作台">
-  <link rel="stylesheet" href="/static/styles.css?v=20260812-account-ui01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260813-account-workbench-ui01">
 </head>
 <body>
   <div class="paper-noise"></div>
@@ -50,21 +50,31 @@
 
           <div class="field token-field account-manager">
             <span class="label-row"><b>Access Token / Session JSON</b><small id="tokenHint">自动识别账号信息 · 本机保存</small></span>
-            <div class="account-toolbar">
-              <button id="accountImportPaste" type="button" class="account-import-btn">导入粘贴内容</button>
-              <label class="account-import-btn" for="accountFileInput">导入 AT 文件</label>
-              <input id="accountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
-              <button id="accountSelectAll" type="button" class="ghost-button account-toolbar-btn" disabled>全选可用</button>
-              <button id="accountBatchRun" type="button" class="account-batch-button" disabled>并发提链（0）</button>
-              <button id="accountDetectProtocol" type="button" class="ghost-button account-toolbar-btn">检测 PayPal 协议（DE）</button>
-              <button id="accountBatchDetect" type="button" class="ghost-button account-toolbar-btn" disabled>批量检测协议（0）</button>
-              <button id="accountClearAll" type="button" class="ghost-button account-toolbar-btn">清空列表</button>
-              <span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span>
+            <div class="account-manager-gateway">
+              <div class="account-manager-gateway-main"><b>账号库在管理中心维护 · 工作台支持并发提链</b><small id="accountGatewaySelectionHint">选择的账号会从管理中心同步到这里，每个账号独立创建任务。</small></div>
+              <div class="account-manager-gateway-actions">
+                <button id="accountSelectAll" type="button" class="ghost-button account-toolbar-btn" disabled>全选可用</button>
+                <button id="accountBatchRun" type="button" class="account-batch-button" disabled>并发提链（0）</button>
+                <a class="account-manager-link" href="/manage#accounts">管理账号 <span>↗</span></a>
+              </div>
             </div>
-            <div id="accountList" class="account-list" hidden></div>
-            <div id="accountListHint" class="account-list-hint" hidden></div>
+            <div class="account-workbench-selection">
+              <div class="account-workbench-selection-head"><span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span><span class="account-selection-note">复选框用于批量提链</span></div>
+              <div id="accountList" class="account-list" hidden></div>
+              <div id="accountListHint" class="account-list-hint" hidden></div>
+            </div>
+            <div class="account-manager-legacy" hidden aria-hidden="true">
+              <div class="account-toolbar">
+                <button id="accountImportPaste" type="button" class="account-import-btn">导入粘贴内容</button>
+                <label class="account-import-btn" for="accountFileInput">导入 AT 文件</label>
+                <input id="accountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
+                <button id="accountDetectProtocol" type="button" class="ghost-button account-toolbar-btn">检测 PayPal 协议（DE）</button>
+                <button id="accountBatchDetect" type="button" class="ghost-button account-toolbar-btn" disabled>批量检测协议（0）</button>
+                <button id="accountClearAll" type="button" class="ghost-button account-toolbar-btn">清空列表</button>
+              </div>
+            </div>
             <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="可直接粘贴一个 AT 提交；或粘贴多个 AT 后点“导入粘贴内容”"></textarea>
-            <span class="field-note">支持直接粘贴单个 Access Token / Session JSON；点击“导入粘贴内容”可把一行一个 AT 的多账号文本写入本机账号列表。账号列表保存在本机浏览器 localStorage，不上传业务服务器；连续 3 次 PayPal 风控拒绝将为该账号本机冷却约 60 分钟，连续 3 次明确账号 block 将进入本机冻结。</span>
+            <span class="field-note">这里仍支持临时手动提交单个 Token；账号导入、协议检测和账号维护请前往管理中心。工作台的复选框可多选账号并发提链。</span>
           </div>
 
         <details class="field-group collapsible-group" id="planSection" open>
@@ -280,6 +290,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260812-account-ui03"></script>
+  <script src="/static/app.js?v=20260813-account-workbench-ui01"></script>
 </body>
 </html>

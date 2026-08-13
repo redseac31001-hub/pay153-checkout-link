@@ -102,6 +102,7 @@ _OPENAI_CHECKOUT_SESSION_RE = re.compile(r"oaics_[A-Za-z0-9_]+")
 CHECKOUT_PROTOCOL_OAICS = "oaics"
 CHECKOUT_PROTOCOL_CS = "cs"
 CHECKOUT_PROTOCOL_UNKNOWN = "unknown"
+OAICS_BILLING_COUNTRY = "DE"
 CHECKOUT_PROTOCOL_HINT_TTL_SECONDS = max(
     300, int(os.getenv("PAY153_CHECKOUT_PROTOCOL_TTL", "86400") or 86400)
 )
@@ -200,6 +201,25 @@ def checkout_protocol_hint_matches(options: dict[str, Any], now: float | None = 
         hint_country == "DE" and hint_currency == "EUR"
     )
     return bool(exact_scope or de_baseline)
+
+
+def resolve_oaics_checkout_region(
+    country: str,
+    currency: str,
+    currency_source: str,
+    *,
+    oaics_hint_active: bool,
+) -> tuple[str, str, str]:
+    """Resolve the initial Checkout billing region for a marked OAICS account.
+
+    The payment proxy is an egress route, not a billing identity.  Once the
+    account protocol marker says OAICS, keep the initial Checkout aligned with
+    the OAICS confirmation path and use the fixed DE/EUR billing region.  The
+    caller still sends the request through the selected proxy pool entry.
+    """
+    if not oaics_hint_active:
+        return country, currency, currency_source
+    return OAICS_BILLING_COUNTRY, "EUR", "OAICS 协议标识固定使用 DE/EUR 账单"
 
 
 class CheckoutSessionContractError(RuntimeError):
@@ -616,6 +636,33 @@ def paypal_billing_target_country(
     if payment_country and payment_country in direct_countries:
         return payment_country
     return checkout_country
+
+
+def build_oaics_billing(
+    email: str = "",
+    *,
+    billing_profile: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Build the billing context for OAICS PayPal confirmation.
+
+    OAICS confirmation is intentionally country-stable: its tax update,
+    confirmation token and PayPal agreement must use a DE billing address even
+    when the Checkout/proxy country is another PayPal region.  A managed DE
+    profile remains usable; profiles from other countries are ignored so the
+    OAICS invariant cannot be overridden by a stale UI selection.
+    """
+    country = OAICS_BILLING_COUNTRY
+    profile_country = str(
+        (billing_profile or {}).get("country") or ""
+    ).strip().upper()
+    profile = billing_profile if profile_country == country else None
+    return country, default_billing(
+        country,
+        email,
+        geo=None,
+        real_random=True,
+        billing_profile=profile,
+    )
 
 
 class ProxySentinel(BaseSentinel):
@@ -1903,6 +1950,7 @@ class JobStore:
                 self.ensure_not_cancelled(job_id)
 
             promo_requested = options["plan"] == "plus" and options.get("use_promo", False)
+            oaics_hint_active = False
             if provider == "paypal":
                 self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
                 entry_geo = proxy_geo_cached(entry_proxy)
@@ -1942,10 +1990,30 @@ class JobStore:
                 options["checkout_country"] = checkout_country
                 options["checkout_currency"] = checkout_currency
                 options["payment_proxy_country"] = payment_country
-                paypal_billing_country = paypal_billing_target_country(
+                oaics_hint_active = (
+                    normalize_checkout_protocol(options.get("checkout_protocol_hint"))
+                    == CHECKOUT_PROTOCOL_OAICS
+                    and checkout_protocol_hint_matches(options)
+                )
+                checkout_country, checkout_currency, currency_source = resolve_oaics_checkout_region(
                     checkout_country,
-                    payment_country,
-                    force_checkout_country=force_paypal_de,
+                    checkout_currency,
+                    currency_source,
+                    oaics_hint_active=oaics_hint_active,
+                )
+                country = checkout_country
+                options["country"] = checkout_country
+                options["currency"] = checkout_currency
+                options["checkout_country"] = checkout_country
+                options["checkout_currency"] = checkout_currency
+                paypal_billing_country = (
+                    OAICS_BILLING_COUNTRY
+                    if oaics_hint_active
+                    else paypal_billing_target_country(
+                        checkout_country,
+                        payment_country,
+                        force_checkout_country=force_paypal_de,
+                    )
                 )
                 options["paypal_billing_country"] = paypal_billing_country
                 selected_paypal_profile = options.get("paypal_billing_profile") or None
@@ -1973,11 +2041,12 @@ class JobStore:
                     self.log(job_id, f"PayPal 优惠识别代理当前为 {main_country or '?'}；不限制国家，继续尝试")
                 self.ensure_not_cancelled(job_id)
             options["checkout_protocol_hint_used"] = ""
+            protocol_hint_active = oaics_hint_active or checkout_protocol_hint_matches(options)
             if (
                 provider == "paypal"
                 and promo_requested
                 and not options.get("detection_only")
-                and checkout_protocol_hint_matches(options)
+                and protocol_hint_active
             ):
                 hint = normalize_checkout_protocol(options.get("checkout_protocol_hint"))
                 options["checkout_protocol_hint_used"] = hint
@@ -1989,8 +2058,8 @@ class JobStore:
                     options["promo_preapplied"] = True
                     self.log(
                         job_id,
-                        "账号协议标识命中 OAICS（DE/EUR 基线或当前地区）；"
-                        "本次首次 Checkout 直接携带原生优惠",
+                        "账号协议标识命中 OAICS；首次 Checkout/账单固定 DE/EUR，"
+                        "代理池 2 仍仅作为网络出口；本次直接携带原生优惠",
                     )
                 else:
                     options["promo_on_create"] = False
@@ -2066,7 +2135,7 @@ class JobStore:
             else:
                 self.log(job_id, f"计划={options['plan']}，方式={provider}，地区={country}/{options['currency']}")
             stage2_text = "第 2/7 步：BR 创建 Checkout（首段不带优惠）" if provider == "pix" else (
-                (f"第 2/7 步：使用 {country} 代理创建 PayPal Checkout"
+                (f"第 2/7 步：使用代理池 2（{payment_country}）创建 {country}/{options['currency']} PayPal Checkout"
                  + ("（原生携带优惠）" if options.get("promo_on_create") else "（稍后更新优惠）"))
                 if provider == "paypal" and promo_requested else (
                     "第 2/7 步：使用 IN 代理创建 UPI Checkout" if provider == "upi" else (
@@ -2083,7 +2152,11 @@ class JobStore:
                     + ("；本轮优惠随 Checkout 创建" if options.get("promo_on_create") else ""),
                 )
             elif provider == "paypal" and promo_requested:
-                self.log(job_id, f"PayPal 设置：代理池 1 用于优惠检查，代理池 2 创建 {country}/{options['currency']} Checkout")
+                self.log(
+                    job_id,
+                    f"PayPal 设置：代理池 1 用于优惠检查，代理池 2（{payment_country}）创建 "
+                    f"{country}/{options['currency']} Checkout",
+                )
             elif provider == "upi":
                 self.log(job_id, "UPI 设置：代理池 1 用于优惠检查，代理池 2 创建 IN/INR Checkout")
             elif provider == "ideal":
@@ -2326,20 +2399,15 @@ class JobStore:
                         raise checkout_session_contract_error(
                             checkout_data, "OpenAI managed Checkout"
                         )
-                    oaics_billing_country = str(
-                        options.get("paypal_billing_country") or country
-                    ).upper()
-                    oaics_profile = options.get("paypal_billing_profile") or None
-                    oaics_geo = payment_geo if (
-                        str(payment_geo.get("country") or "").upper()
-                        == oaics_billing_country
-                    ) else None
-                    oaics_billing = default_billing(
-                        oaics_billing_country,
+                    oaics_billing_country, oaics_billing = build_oaics_billing(
                         meta.get("email") or "",
-                        geo=oaics_geo,
-                        real_random=True,
-                        billing_profile=oaics_profile,
+                        billing_profile=options.get("paypal_billing_profile") or None,
+                    )
+                    options["paypal_billing_country"] = oaics_billing_country
+                    self.log(
+                        job_id,
+                        f"OAICS PayPal 账单地址固定使用 {oaics_billing_country}；"
+                        f"Checkout={country}/{options.get('checkout_currency') or options.get('currency')}",
                     )
                     self.log(
                         job_id,
