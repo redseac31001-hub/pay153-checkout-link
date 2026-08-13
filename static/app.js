@@ -104,6 +104,9 @@ let activeProxyRail = '';
 let proxyProfiles = {};
 let defaultProxyProfile = {entry: '', exit: ''};
 let proxyInputDirty = false;
+let manageProxyImportTarget = '';
+let manageProxyImportPools = [];
+let manageProxyImportRevision = 0;
 let billingProfiles = {};
 let activeBillingProfileKey = '';
 let billingSaveTimer = 0;
@@ -121,6 +124,14 @@ const providerDefaults = {
   pix: {country: 'BR', currency: 'BRL'}, gopay: {country: 'ID', currency: 'IDR'}
 };
 const countryCurrency = {US:'USD',DE:'EUR',FR:'EUR',NL:'EUR',IN:'INR',BR:'BRL',GB:'GBP',JP:'JPY',AU:'AUD',CA:'CAD',ID:'IDR'};
+const railDisplayDetails = {
+  hosted: {icon: '↗', title: 'Hosted', description: '官方 Checkout 托管，返回支付长链。', method: 'Checkout 长链'},
+  paypal: {icon: 'P', title: 'PayPal', description: '生成 PayPal Approve 跳转，完成账单授权。', method: 'PayPal 跳转'},
+  ideal: {icon: 'iD', title: 'iDEAL', description: '使用荷兰 iDEAL 银行授权完成支付。', method: '银行授权'},
+  upi: {icon: '₹', title: 'UPI', description: '生成印度 UPI 支付二维码。', method: 'UPI 二维码'},
+  pix: {icon: '◇', title: 'PIX', description: '生成巴西 PIX 即时支付二维码。', method: 'PIX 二维码'},
+  gopay: {icon: 'G', title: 'Gopay', description: '使用印尼 Gopay 电子钱包完成支付。', method: 'Gopay 钱包'}
+};
 
 function proxyLines(node){
   return node.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
@@ -243,6 +254,165 @@ function scheduleProxyProfileSave(){
 function saveProxyPools(){
   proxyInputDirty = true;
   scheduleProxyProfileSave();
+}
+
+function proxyImportTargetLabel(target){
+  return target === 'exit' ? '代理池 2' : '代理池 1';
+}
+function proxyImportPoolKindLabel(kind){
+  return kind === 'exit' ? '出口池' : kind === 'entry' ? '入口池' : '共享池';
+}
+function setProxyImportStatus(text, state=''){
+  const node = $('proxyImportStatus');
+  if (!node) return;
+  node.textContent = text;
+  node.className = `proxy-import-status${state ? ` ${state}` : ''}`;
+}
+function renderProxyImportLoginHint(message){
+  const list = $('proxyImportPoolList');
+  if (list) {
+    list.replaceChildren();
+    const empty = document.createElement('div');
+    empty.className = 'proxy-import-empty';
+    empty.textContent = message;
+    const link = document.createElement('a');
+    link.className = 'proxy-import-login';
+    link.href = '/manage#proxies';
+    link.textContent = '打开管理中心登录';
+    empty.append(link);
+    list.append(empty);
+  }
+}
+function proxyImportPoolCandidates(target){
+  const targetKind = target === 'exit' ? 'exit' : 'entry';
+  return manageProxyImportPools
+    .filter(item => item && item.enabled !== false)
+    .map((item, index) => ({item, index}))
+    .sort((left, right) => {
+      const leftRank = left.item.pool_kind === targetKind ? 0 : left.item.pool_kind === 'entry' || left.item.pool_kind === 'exit' ? 1 : 2;
+      const rightRank = right.item.pool_kind === targetKind ? 0 : right.item.pool_kind === 'entry' || right.item.pool_kind === 'exit' ? 1 : 2;
+      return leftRank - rightRank || String(left.item.name || '').localeCompare(String(right.item.name || ''), 'zh-CN') || left.index - right.index;
+    })
+    .map(item => item.item);
+}
+function renderProxyImportPools(){
+  const list = $('proxyImportPoolList');
+  if (!list) return;
+  list.replaceChildren();
+  const target = manageProxyImportTarget || 'entry';
+  const candidates = proxyImportPoolCandidates(target);
+  if (!candidates.length) {
+    setProxyImportStatus('管理中心暂无可导入的启用代理池。', 'error');
+    const empty = document.createElement('div');
+    empty.className = 'proxy-import-empty';
+    empty.textContent = '请先在管理中心新增并启用代理池。';
+    list.append(empty);
+    return;
+  }
+  setProxyImportStatus(`已读取 ${candidates.length} 个可用代理池，选择后读取实际线路。`, 'ready');
+  candidates.forEach(item => {
+    const row = document.createElement('article');
+    row.className = 'proxy-import-item';
+    const main = document.createElement('div');
+    main.className = 'proxy-import-item-main';
+    const title = document.createElement('div');
+    title.className = 'proxy-import-item-title';
+    const name = document.createElement('b');
+    name.textContent = String(item.name || `代理池 ${item.id || ''}`).trim() || '未命名代理池';
+    const kind = document.createElement('small');
+    kind.textContent = proxyImportPoolKindLabel(String(item.pool_kind || '').toLowerCase());
+    title.append(name, kind);
+    const meta = document.createElement('div');
+    meta.className = 'proxy-import-item-meta';
+    meta.textContent = [item.rail && item.rail !== 'shared' ? String(item.rail).toUpperCase() : '共享', item.country || '未指定地区', `${Number(item.proxy_count) || 0} 条`].join(' · ');
+    const preview = document.createElement('div');
+    preview.className = 'proxy-import-item-preview';
+    preview.textContent = Array.isArray(item.proxy_preview) && item.proxy_preview.length ? item.proxy_preview.join(' · ') : '线路内容按需读取';
+    main.append(title, meta, preview);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'proxy-import-item-button';
+    button.textContent = `导入到${proxyImportTargetLabel(target)}`;
+    button.addEventListener('click', () => void importManagedProxyPool(item.id, button));
+    row.append(main, button);
+    list.append(row);
+  });
+}
+async function loadManageProxyImportPools(){
+  const revision = manageProxyImportRevision;
+  setProxyImportStatus('正在读取管理中心代理池……', 'loading');
+  renderProxyImportLoginHint('正在检查管理中心登录状态。');
+  try {
+    const sessionResponse = await fetch('/api/manage/session', {cache: 'no-store', credentials: 'same-origin'});
+    const session = await sessionResponse.json().catch(() => ({}));
+    if (revision !== manageProxyImportRevision) return;
+    if (!sessionResponse.ok || !session.configured) {
+      setProxyImportStatus('管理中心未启用，暂时无法读取代理池。', 'error');
+      renderProxyImportLoginHint('请先在服务端启用管理中心后再导入。');
+      return;
+    }
+    if (!session.authenticated) {
+      setProxyImportStatus('请先登录管理中心，再读取代理池。', 'error');
+      renderProxyImportLoginHint('当前浏览器尚未登录管理中心。');
+      return;
+    }
+    const response = await fetch('/api/manage/proxy-pools', {cache: 'no-store', credentials: 'same-origin'});
+    const data = await response.json().catch(() => ({}));
+    if (revision !== manageProxyImportRevision) return;
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    manageProxyImportPools = Array.isArray(data.items) ? data.items : [];
+    renderProxyImportPools();
+  } catch (error) {
+    if (revision !== manageProxyImportRevision) return;
+    manageProxyImportPools = [];
+    setProxyImportStatus(`读取失败：${error.message || error}`, 'error');
+    renderProxyImportLoginHint('管理中心暂时不可用，请检查登录状态或服务端配置。');
+  }
+}
+function openManageProxyImport(target){
+  manageProxyImportTarget = target === 'exit' ? 'exit' : 'entry';
+  const panel = $('proxyImportPanel');
+  if (!panel) return;
+  panel.hidden = false;
+  $('proxyImportTarget').textContent = `目标：${proxyImportTargetLabel(manageProxyImportTarget)}`;
+  manageProxyImportRevision += 1;
+  manageProxyImportPools = [];
+  void loadManageProxyImportPools();
+}
+function closeManageProxyImport(){
+  manageProxyImportRevision += 1;
+  manageProxyImportTarget = '';
+  manageProxyImportPools = [];
+  if ($('proxyImportPanel')) $('proxyImportPanel').hidden = true;
+}
+async function importManagedProxyPool(poolId, button){
+  const target = manageProxyImportTarget === 'exit' ? 'exit' : 'entry';
+  const input = $(target === 'exit' ? 'exitProxy' : 'entryProxy');
+  const count = $(target === 'exit' ? 'exitProxyCount' : 'entryProxyCount');
+  const probe = $(target === 'exit' ? 'exitProxyProbe' : 'entryProxyProbe');
+  const pool = manageProxyImportPools.find(item => String(item.id) === String(poolId));
+  if (!input || !pool) return;
+  if (proxyLines(input).length && typeof window.confirm === 'function' && !window.confirm(`导入“${pool.name || pool.id}”会替换${proxyImportTargetLabel(target)}当前内容，是否继续？`)) return;
+  button.disabled = true;
+  setProxyImportStatus(`正在读取“${pool.name || pool.id}”的实际线路……`, 'loading');
+  try {
+    const response = await fetch(`/api/manage/proxy-pools/${encodeURIComponent(poolId)}?reveal=1`, {cache: 'no-store', credentials: 'same-origin'});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const item = data.item || data;
+    const proxies = Array.isArray(item.proxies) ? item.proxies.map(value => String(value || '').trim()).filter(Boolean) : [];
+    if (!proxies.length) throw new Error('该代理池没有可用线路');
+    input.value = proxies.join('\n');
+    updateProxyCount(input, count);
+    saveProxyPools();
+    setProxyProbeResult(probe, `已导入 ${proxies.length} 条线路：${item.name || pool.name || pool.id}`, 'success');
+    setProxyImportStatus(`已导入 ${proxies.length} 条线路到${proxyImportTargetLabel(target)}，本地配置会自动保存。`, 'ready');
+    setProxySaveState(`已导入${proxyImportTargetLabel(target)}`);
+  } catch (error) {
+    setProxyImportStatus(`导入失败：${error.message || error}`, 'error');
+  } finally {
+    button.disabled = false;
+  }
 }
 function switchProxyProfile(rail){
   if (!rail || rail === activeProxyRail) return;
@@ -747,11 +917,20 @@ const planDisplayNames = {plus:'Plus', pro:'Pro', team:'Team', codex_low:'Codex'
 const railDisplayNames = {hosted:'Hosted', paypal:'PayPal', ideal:'iDEAL', upi:'UPI', pix:'PIX', gopay:'Gopay'};
 const COLLAPSIBLE_STORAGE_KEY = 'pay153.collapsible_sections.v1';
 
+function updateRailDetails(){
+  const rail = selected('link_type');
+  const details = railDisplayDetails[rail] || {icon: '·', title: '未选择', description: '请选择一个支付路径。', method: '待选择'};
+  if ($('railDetailsIcon')) $('railDetailsIcon').textContent = details.icon;
+  if ($('railDetailsTitle')) $('railDetailsTitle').textContent = details.title;
+  if ($('railDetailsDescription')) $('railDetailsDescription').textContent = details.description;
+  if ($('railDetailsMethod')) $('railDetailsMethod').textContent = details.method;
+}
 function updateSelectionSummaries(){
   const plan = selected('plan');
   const rail = selected('link_type');
   if ($('planSelection')) $('planSelection').textContent = planDisplayNames[plan] || '未选择';
   if ($('railSelection')) $('railSelection').textContent = railDisplayNames[rail] || '未选择';
+  updateRailDetails();
 }
 
 function initializeCollapsibleSections(){
@@ -849,6 +1028,9 @@ $('entryProxy').addEventListener('input', () => { updateProxyCount($('entryProxy
 $('exitProxy').addEventListener('input', () => { updateProxyCount($('exitProxy'), $('exitProxyCount')); saveProxyPools(); });
 $('probeEntryProxy').addEventListener('click', () => probeProxyPool('entryProxy', 'probeEntryProxy', 'entryProxyProbe', '代理池 1'));
 $('probeExitProxy').addEventListener('click', () => probeProxyPool('exitProxy', 'probeExitProxy', 'exitProxyProbe', '代理池 2'));
+$('importEntryProxy').addEventListener('click', () => openManageProxyImport('entry'));
+$('importExitProxy').addEventListener('click', () => openManageProxyImport('exit'));
+$('closeProxyImport').addEventListener('click', closeManageProxyImport);
 $('saveProxyDefault').addEventListener('click', saveCurrentAsDefault);
 $('clearBillingProfile').addEventListener('click', clearBillingProfile);
 ['billingName', 'billingEmail', 'billingLine1', 'billingLine2', 'billingCity', 'billingState', 'billingPostalCode']
@@ -2145,6 +2327,32 @@ function resultUrl(result){
   }) || '';
 }
 
+function renderResultPaymentMethods(result){
+  const node = $('resultPaymentMethods');
+  if (!node) return;
+  node.replaceChildren();
+  node.classList.remove('is-empty');
+  const raw = result?.oaics_payment_method_types ?? result?.payment_method_types ?? result?.payment_method_type ?? [];
+  const values = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const methods = [...new Set(values.map(value => {
+    if (value && typeof value === 'object') return value.type || value.name || value.code || '';
+    return value;
+  }).map(normalizeAccountPaymentMethod).filter(Boolean))];
+  if (!methods.length) {
+    node.classList.add('is-empty');
+    node.textContent = result?.detection_only
+      ? '未暴露'
+      : (railDisplayDetails[result?.link_type]?.method || '按路径生成');
+    return;
+  }
+  methods.forEach(method => {
+    const tag = document.createElement('span');
+    tag.className = 'result-method-tag';
+    tag.textContent = accountMethodLabel(method);
+    node.append(tag);
+  });
+}
+
 function showResult(result){
   if (!$('resultPanel')) return;
   const url = resultUrl(result);
@@ -2152,6 +2360,7 @@ function showResult(result){
   if ($('resultType')) $('resultType').textContent = result?.detection_only
     ? 'PayPal 协议检测'
     : (railDisplayNames[result?.link_type] || result?.link_type || '—');
+  renderResultPaymentMethods(result);
   if ($('resultEmail')) $('resultEmail').textContent = result?.account_email || result?.account_id || '—';
   if ($('resultRegion')) $('resultRegion').textContent = [result?.checkout_country || result?.country, result?.checkout_currency || result?.currency].filter(Boolean).join(' / ') || '—';
   if ($('resultPromo')) {

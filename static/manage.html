@@ -103,6 +103,8 @@
                   <label class="secondary-button account-file-button" for="manageAccountFileInput">导入 AT 文件</label>
                   <input id="manageAccountFileInput" type="file" accept=".at,.txt,.json,.jwt,text/plain,application/json" multiple hidden>
                   <button id="manageSelectAll" class="secondary-button" type="button">全选可用</button>
+                  <button id="manageClearSelection" class="secondary-button" type="button" disabled>取消勾选</button>
+                  <button id="manageExportEmails" class="secondary-button" type="button">导出邮箱名称</button>
                   <button id="manageClearAll" class="text-button danger-text" type="button">清空账号</button>
                 </div>
                 <p class="account-ops-hint">选择复选框后可批量检测，也会同步到工作台的并发提链选择；点击“使用”会把账号设为工作台的当前账号。</p>
@@ -242,6 +244,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>管理中心只建议在受控的本地网络中开放。</p></footer>
-  <script src="/static/manage.js?v=20260813-manage-concurrency-v1"></script>
+  <script src="/static/manage.js?v=20260813-manage-email-export-v1"></script>
 </body>
 </html>

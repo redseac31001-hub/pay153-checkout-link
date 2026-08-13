@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>PAY.153 · 多通道提链控制台</title>
   <meta name="description" content="Hosted、PayPal、iDEAL、UPI、PIX、Gopay、Team 与 Codex 空间提链工作台">
-  <link rel="stylesheet" href="/static/styles.css?v=20260813-account-workbench-ui01">
+  <link rel="stylesheet" href="/static/styles.css?v=20260813-proxy-import-payment-ui01">
 </head>
 <body>
   <div class="paper-noise"></div>
@@ -102,12 +102,17 @@
           </summary>
           <div class="collapsible-body">
             <div class="choice-grid rail-grid" id="railGrid">
-              <label class="rail active"><input type="radio" name="link_type" value="hosted" checked><span class="rail-icon">↗</span><span><b>Hosted</b><small>官方支付长链</small></span></label>
-              <label class="rail"><input type="radio" name="link_type" value="paypal"><span class="rail-icon">P</span><span><b>PayPal</b><small>Approve 跳转</small></span></label>
-              <label class="rail"><input type="radio" name="link_type" value="ideal"><span class="rail-icon">iD</span><span><b>iDEAL</b><small>荷兰银行支付</small></span></label>
-              <label class="rail"><input type="radio" name="link_type" value="upi"><span class="rail-icon">₹</span><span><b>UPI</b><small>印度二维码</small></span></label>
-              <label class="rail"><input type="radio" name="link_type" value="pix"><span class="rail-icon">◇</span><span><b>PIX</b><small>巴西即时支付</small></span></label>
-              <label class="rail"><input type="radio" name="link_type" value="gopay"><span class="rail-icon">G</span><span><b>Gopay</b><small>印尼电子钱包</small></span></label>
+              <label class="rail active"><input type="radio" name="link_type" value="hosted" checked><span class="rail-icon">↗</span><span><b>Hosted</b><small>官方 Checkout · 长链</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="paypal"><span class="rail-icon">P</span><span><b>PayPal</b><small>PayPal · Approve 跳转</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="ideal"><span class="rail-icon">iD</span><span><b>iDEAL</b><small>iDEAL · 荷兰银行</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="upi"><span class="rail-icon">₹</span><span><b>UPI</b><small>UPI · 印度二维码</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="pix"><span class="rail-icon">◇</span><span><b>PIX</b><small>PIX · 巴西二维码</small></span></label>
+              <label class="rail"><input type="radio" name="link_type" value="gopay"><span class="rail-icon">G</span><span><b>Gopay</b><small>Gopay · 印尼钱包</small></span></label>
+            </div>
+            <div id="railDetails" class="rail-details" aria-live="polite">
+              <span id="railDetailsIcon" class="rail-details-icon" aria-hidden="true">↗</span>
+              <span class="rail-details-copy"><b id="railDetailsTitle">Hosted</b><small id="railDetailsDescription">官方 Checkout 托管，返回支付长链。</small></span>
+              <span id="railDetailsMethod" class="rail-details-method">Checkout 长链</span>
             </div>
           </div>
         </details>
@@ -162,12 +167,12 @@
           </div>
           <div class="two-cols" id="proxyGrid">
             <label class="field">
-              <span class="proxy-label-row"><span>代理池 1 <small id="entryProxyCount">0 / 500</small></span><button id="probeEntryProxy" class="proxy-probe-button" type="button">随机检测</button></span>
+              <span class="proxy-label-row"><span>代理池 1 <small id="entryProxyCount">0 / 500</small></span><span class="proxy-field-actions"><button id="probeEntryProxy" class="proxy-probe-button" type="button">随机检测</button><button id="importEntryProxy" class="proxy-import-button" type="button">管理中心导入</button></span></span>
               <textarea id="entryProxy" class="proxy-pool-input" required autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea>
               <small id="entryProxyProbe" class="proxy-probe-result" aria-live="polite">检测只随机使用 1 条代理，查询公网 IP 和国家。</small>
             </label>
             <label class="field" id="exitProxyField" hidden>
-              <span class="proxy-label-row"><span>代理池 2 <small><i id="exitProxyHint">推荐代理</i> · <b id="exitProxyCount">0 / 500</b></small></span><button id="probeExitProxy" class="proxy-probe-button" type="button">随机检测</button></span>
+              <span class="proxy-label-row"><span>代理池 2 <small><i id="exitProxyHint">推荐代理</i> · <b id="exitProxyCount">0 / 500</b></small></span><span class="proxy-field-actions"><button id="probeExitProxy" class="proxy-probe-button" type="button">随机检测</button><button id="importExitProxy" class="proxy-import-button" type="button">管理中心导入</button></span></span>
               <textarea id="exitProxy" class="proxy-pool-input" autocomplete="off" spellcheck="false" placeholder="每行一个代理，支持 1-500 条"></textarea>
               <small id="exitProxyProbe" class="proxy-probe-result" aria-live="polite">检测只随机使用 1 条代理，查询公网 IP 和国家。</small>
             </label>
@@ -179,6 +184,14 @@
           <div class="proxy-foot">
             <span id="proxyFootHint">推荐代理会根据所选支付方式自动显示。</span>
             <div class="proxy-foot-actions"><button id="saveProxyDefault" type="button">将当前配置设为默认共享</button><button id="copyEntryProxy" type="button">复制代理池 1 到代理池 2</button></div>
+          </div>
+          <div id="proxyImportPanel" class="proxy-import-panel" hidden>
+            <div class="proxy-import-heading">
+              <div><b>从管理中心导入</b><small id="proxyImportTarget">目标：代理池 1</small></div>
+              <button id="closeProxyImport" class="proxy-import-close" type="button">关闭</button>
+            </div>
+            <p id="proxyImportStatus" class="proxy-import-status" aria-live="polite">正在读取管理中心代理池……</p>
+            <div id="proxyImportPoolList" class="proxy-import-list"></div>
           </div>
         </section>
 
@@ -269,9 +282,10 @@
         <section id="resultPanel" class="panel result-panel" hidden>
           <div class="panel-heading"><div><span class="section-index">C</span><h2>提炼结果</h2></div><span class="seal">READY</span></div>
           <div id="qrWrap" class="qr-wrap" hidden><img id="qrImage" alt="支付二维码"><span id="qrCountdown"></span></div>
-          <div class="result-list">
-            <div><span>支付路径</span><b id="resultType">—</b></div>
-            <div><span>账号</span><b id="resultEmail">—</b></div>
+            <div class="result-list">
+              <div><span>支付路径</span><b id="resultType">—</b></div>
+              <div><span>支付方式</span><b id="resultPaymentMethods" class="result-methods">—</b></div>
+              <div><span>账号</span><b id="resultEmail">—</b></div>
             <div><span>地区</span><b id="resultRegion">—</b></div>
             <div><span>优惠状态</span><b id="resultPromo">—</b></div>
             <div><span>Session</span><code id="resultSession">—</code></div>
@@ -291,6 +305,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>任务完成后请及时使用链接；支付提供商生成的二维码通常具有有效期。</p></footer>
-  <script src="/static/app.js?v=20260813-account-workbench-ui01"></script>
+  <script src="/static/app.js?v=20260813-proxy-import-payment-ui01"></script>
 </body>
 </html>

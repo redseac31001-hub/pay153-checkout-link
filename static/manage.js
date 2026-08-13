@@ -293,7 +293,7 @@ function renderAccounts(items, pagination = {}) {
     checkbox.type = 'checkbox';
     checkbox.className = 'manage-account-check';
     checkbox.checked = state.selectedAccountIds.has(item.id);
-    checkbox.disabled = !manageAccountCanBatch(item);
+    checkbox.disabled = !manageAccountCanBatch(item) || state.detectionRunning;
     checkbox.setAttribute('aria-label', `选择 ${item.label || item.email || item.accountId} 批量检测或并发提链`);
     checkbox.addEventListener('click', event => event.stopPropagation());
     checkbox.addEventListener('change', () => {
@@ -639,7 +639,8 @@ function refreshManageAccountState() {
     state.activeAccountId = state.accounts[0]?.id || '';
   }
   const storedSelectedIds = Array.isArray(payload.selectedIds) ? payload.selectedIds.map(id => String(id)) : [];
-  state.selectedAccountIds = new Set(storedSelectedIds.filter(id => state.accounts.some(item => item.id === id)));
+  const availableIds = new Set(state.accounts.filter(manageAccountCanBatch).map(item => item.id));
+  state.selectedAccountIds = new Set(storedSelectedIds.filter(id => availableIds.has(id)));
   renderFilteredAccounts();
   updateManageAccountControls();
 }
@@ -733,6 +734,35 @@ function clearManageAccounts() {
   setMessage($('manageAccountStatus'), '已清空本机账号列表');
 }
 
+function exportManageAccountEmails() {
+  const seen = new Set();
+  const emails = state.accounts
+    .map(item => manageAccountEmail(item))
+    .map(value => String(value || '').trim())
+    .filter(email => {
+      const key = email.toLowerCase();
+      if (!email || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  if (!emails.length) {
+    setMessage($('manageAccountStatus'), '当前账号库没有可导出的邮箱名称', true);
+    return;
+  }
+  const content = `${emails.join('\n')}\n`;
+  const blob = new Blob([content], {type: 'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `pay153-email-names-${new Date().toISOString().slice(0, 10)}.txt`;
+  link.style.display = 'none';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  setMessage($('manageAccountStatus'), `已导出 ${emails.length} 个邮箱名称`);
+}
+
 function updateManageAccountControls() {
   const selected = manageSelectedAccounts();
   const detect = $('manageDetectSelected');
@@ -746,9 +776,26 @@ function updateManageAccountControls() {
   if (selectAll) {
     const available = state.accounts.filter(manageAccountCanBatch);
     const allSelected = available.length > 0 && available.every(item => state.selectedAccountIds.has(item.id));
-    selectAll.disabled = !available.length || state.detectionRunning;
-    selectAll.textContent = allSelected ? '取消全选' : '全选可用';
+    selectAll.disabled = !available.length || allSelected || state.detectionRunning;
+    selectAll.textContent = '全选可用';
   }
+  const clearSelection = $('manageClearSelection');
+  if (clearSelection) {
+    clearSelection.disabled = !selected.length || state.detectionRunning;
+    clearSelection.textContent = selected.length ? `取消勾选（${selected.length}）` : '取消勾选';
+  }
+}
+
+function clearManageAccountSelection(accountIds = null, message = '') {
+  if (Array.isArray(accountIds)) {
+    accountIds.forEach(id => state.selectedAccountIds.delete(String(id)));
+  } else {
+    state.selectedAccountIds.clear();
+  }
+  persistManageAccounts();
+  renderFilteredAccounts();
+  updateManageAccountControls();
+  if (message) setMessage($('manageAccountStatus'), message);
 }
 
 function manageProxyCandidates(kind) {
@@ -1199,6 +1246,7 @@ async function startManageProtocolDetection(accountIds) {
   } catch (error) {
     setManageDetectionStatus(error.message || String(error), true);
   } finally {
+    clearManageAccountSelection(accountIds);
     state.detectionRunning = false;
     updateManageAccountControls();
     renderManageDetectionJobs();
@@ -1793,15 +1841,15 @@ function bindEvents() {
   });
   $('manageSelectAll')?.addEventListener('click', () => {
     const available = state.accounts.filter(manageAccountCanBatch);
-    const allSelected = available.length > 0 && available.every(item => state.selectedAccountIds.has(item.id));
-    available.forEach(item => {
-      if (allSelected) state.selectedAccountIds.delete(item.id);
-      else state.selectedAccountIds.add(item.id);
-    });
+    available.forEach(item => state.selectedAccountIds.add(item.id));
     persistManageAccounts();
     renderFilteredAccounts();
     updateManageAccountControls();
   });
+  $('manageClearSelection')?.addEventListener('click', () => {
+    clearManageAccountSelection(null, '已取消全部账号勾选');
+  });
+  $('manageExportEmails')?.addEventListener('click', exportManageAccountEmails);
   $('manageClearAll')?.addEventListener('click', clearManageAccounts);
   $('manageDetectCurrent')?.addEventListener('click', () => {
     if (state.activeAccountId) void startManageProtocolDetection([state.activeAccountId]);

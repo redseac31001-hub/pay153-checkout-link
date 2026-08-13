@@ -1,0 +1,75 @@
+======================================================================
+Pay153 代理随机检测诊断  start=13:21:47
+PRE_PROXY env='socks5h://127.0.0.1:9697'
+proxy_pre_proxy()='socks5h://127.0.0.1:9697'
+======================================================================
+
+[A] 基线
+  OK  A1 本机直连: JP/Kanagawa/Yokohama ip=106.178.204.31 538ms
+  OK  A2 本地9697作主代理: JP/Kanagawa/Yokohama ip=106.178.204.31 493ms
+  OK  A3 仅PRE 无池: JP/Kanagawa/Yokohama ip=106.178.204.31 495ms
+
+[B] Manage 代理池
+  池数 4
+  #3 gopay · entry rail=gopay country= kind=entry enabled=True n=20 ['http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000']
+  #4 gopay · exit rail=gopay country= kind=exit enabled=True n=20 ['http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000']
+  #1 default · entry rail=shared country= kind=entry enabled=True n=10 ['http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000']
+  #2 default · exit rail=shared country= kind=exit enabled=True n=20 ['http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000', 'http://***:***@us.novproxy.io:1000']
+
+[C] 随机抽检
+
+-- 池#3 gopay · entry rail=gopay country= kind=entry 抽样3/20
+   样本1: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query ConnectionError:Failed to perform, curl: (52) Empty reply from server. See https://curl.se/libcu | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10013 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See 25049ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1716ms
+   样本2: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10013 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10007 milliseconds. See 30043ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1655ms
+   样本3: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10003 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10014 milliseconds. See 30049ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1603ms
+
+-- 池#4 gopay · exit rail=gopay country= kind=exit 抽样3/20
+   样本1: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10002 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See 30045ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1771ms
+   样本2: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10001 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10007 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See 30029ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1632ms
+   样本3: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10015 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10014 milliseconds. See 30049ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1581ms
+
+-- 池#1 default · entry rail=shared country= kind=entry 抽样3/10
+   样本1: http://t***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10001 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10017 milliseconds. See 30037ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 3055ms
+   样本2: http://t***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10009 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10014 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10003 milliseconds. See 30030ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1650ms
+   样本3: http://t***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10010 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10016 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See 30046ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1567ms
+
+-- 池#2 default · exit rail=shared country= kind=exit 抽样3/20
+   样本1: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10004 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10015 milliseconds. See 30049ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1613ms
+   样本2: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10014 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10001 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10014 milliseconds. See 30034ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1900ms
+   样本3: http://p***@us.novproxy.io:1000
+    FAIL 双层PRE+池: [TIMEOUT] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query Timeout:Failed to perform, curl: (28) Operation timed out after 10008 milliseconds with  | https://ipapi.co/json/ Timeout:Failed to perform, curl: (28) Connection timed out after 10002 milliseconds. See | https://api.ipify.org?format=json Timeout:Failed to perform, curl: (28) Connection timed out after 10013 milliseconds. See 30034ms
+    FAIL 直连池无PRE: [PROXY] http://ip-api.com/json/?fields=status,countryCode,regionName,city,query HTTP 403 | https://ipapi.co/json/ ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c | https://api.ipify.org?format=json ProxyError:Failed to perform, curl: (56) CONNECT tunnel failed, response 403. See https://c 1599ms
+
+[D] app.proxy_geo 抽 3
+   pool#4 http://p***@us.novproxy.io:1000 -> FAIL RuntimeError: 代理地区检测失败：Timeout / Timeout / Timeout 60034ms
+   pool#3 http://p***@us.novproxy.io:1000 -> FAIL RuntimeError: 代理地区检测失败：Timeout / Timeout / Timeout 60023ms
+   pool#3 http://p***@us.novproxy.io:1000 -> FAIL RuntimeError: 代理地区检测失败：Timeout / Timeout / Timeout 60042ms
+
+[E] 汇总
+双层PRE: OK 0 / FAIL 12
+直连:   OK 0 / FAIL 12
+失败分类: {'TIMEOUT': 12, 'PROXY': 12}
+判定: 池条目大面积不可达(凭据/节点/协议)，非本地代理问题
+======================================================================
