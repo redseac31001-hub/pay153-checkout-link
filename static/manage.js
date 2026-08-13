@@ -8,6 +8,10 @@ const STORAGE_KEYS = {
   asn: 'pay153.proxy_asn_recommendations.v1'
 };
 const ACCOUNT_STORAGE_KEY = 'pay153.accounts.v1';
+const ACCOUNT_PAGE_SIZE = 20;
+const MANAGE_DETECTION_CONCURRENCY_KEY = 'pay153.manage.detection.concurrency.v1';
+const DEFAULT_MANAGE_DETECTION_CONCURRENCY = 3;
+const DEFAULT_TASK_LIMITS = {perIp: 3, global: 20, workers: 20};
 
 const state = {
   proxies: [],
@@ -20,6 +24,9 @@ const state = {
   activeAccountId: '',
   selectedAccountIds: new Set(),
   accountSequence: 0,
+  accountPage: 1,
+  taskLimits: {...DEFAULT_TASK_LIMITS},
+  detectionConcurrency: DEFAULT_MANAGE_DETECTION_CONCURRENCY,
   detectionJobs: [],
   detectionRunning: false
 };
@@ -75,6 +82,12 @@ function setMessage(element, value, isError = false) {
 function formatTime(value) {
   const output = String(value || '').replace('T', ' ');
   return output.length > 16 ? output.slice(0, 16) : text(output);
+}
+
+function accountTimestamp(value) {
+  const timestamp = Number(value || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return 0;
+  return timestamp < 100000000000 ? timestamp * 1000 : timestamp;
 }
 
 function accountExpiryView(exp) {
@@ -230,6 +243,7 @@ function localAccountList() {
     consecutiveDeclines: Number(item.consecutiveDeclines || 0),
     consecutiveBlocks: Number(item.consecutiveBlocks || 0),
     frozenAt: Number(item.frozenAt || 0),
+    addedAt: accountTimestamp(item.addedAt || item.createdAt || item.joinedAt || item.updatedAt),
     updatedAt: Number(item.updatedAt || 0),
     lastError: String(item.lastError || '').slice(0, 240),
     lastStatus: String(item.lastStatus || '').slice(0, 40),
@@ -245,19 +259,27 @@ function localAccountList() {
 
 function accountMatchesFilters(item) {
   const query = String($('accountQuery')?.value || '').trim().toLowerCase();
+  const protocol = String($('accountProtocolFilter')?.value || '').toLowerCase();
   const promo = String($('accountPromoFilter')?.value || '');
   const risk = String($('accountRiskFilter')?.value || '');
   const method = String($('accountMethodFilter')?.value || '').toLowerCase();
   const haystack = [item.label, item.email, item.accountId, item.source, item.lastError, item.riskReason, item.promoReason]
     .map(value => String(value || '').toLowerCase()).join(' ');
   if (query && !haystack.includes(query)) return false;
+  if (protocol && accountProtocolView(item).protocol !== protocol) return false;
   if (promo && item.promoStatus !== promo) return false;
   if (risk && item.riskStatus !== risk) return false;
   if (method && item.paymentMethods?.[method] !== 'supported') return false;
   return true;
 }
 
-function renderAccounts(items) {
+function compareAccountsByAddedAt(left, right) {
+  const addedAtDifference = accountTimestamp(right.addedAt) - accountTimestamp(left.addedAt);
+  if (addedAtDifference) return addedAtDifference;
+  return String(right.id || '').localeCompare(String(left.id || ''));
+}
+
+function renderAccounts(items, pagination = {}) {
   const table = $('accountTable');
   if (!table) return;
   table.replaceChildren();
@@ -279,7 +301,7 @@ function renderAccounts(items) {
       else state.selectedAccountIds.delete(item.id);
       persistManageAccounts();
       updateManageAccountControls();
-      renderAccounts(state.accounts.filter(accountMatchesFilters));
+      renderFilteredAccounts();
     });
     selectCell.append(checkbox);
 
@@ -395,15 +417,45 @@ function renderAccounts(items) {
     row.append(selectCell, identity, protocolCell, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell, actions);
     table.append(row);
   });
-  setTableState('accountTable', 'accountEmpty', items.length, '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');
+  setTableState('accountTable', 'accountEmpty', items.length, state.accounts.length ? '当前筛选条件下没有匹配的账号。' : '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');
   const riskCount = state.accounts.filter(item => ['rejected', 'cooldown', 'blocked', 'frozen'].includes(item.riskStatus)).length;
-  if ($('accountListMeta')) $('accountListMeta').textContent = `${items.length} 个账号 · 已选 ${manageSelectedAccounts().length} · ${riskCount} 个需要关注`;
+  const total = Number(pagination.total ?? items.length);
+  const accountCount = total === state.accounts.length ? `${total} 个账号` : `${total} / ${state.accounts.length} 个账号`;
+  if ($('accountListMeta')) $('accountListMeta').textContent = `${accountCount} · 已选 ${manageSelectedAccounts().length} · ${riskCount} 个需要关注`;
   if ($('statAccounts')) $('statAccounts').textContent = text(state.accounts.length, '0');
   if ($('statAccountRisk')) $('statAccountRisk').textContent = riskCount ? `${riskCount} 个需要关注` : '暂无拒绝 / 冷却信号';
 }
 
 function renderFilteredAccounts() {
-  renderAccounts(state.accounts.filter(accountMatchesFilters));
+  const filtered = state.accounts.filter(accountMatchesFilters).sort(compareAccountsByAddedAt);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / ACCOUNT_PAGE_SIZE));
+  state.accountPage = Math.min(Math.max(1, Number(state.accountPage) || 1), totalPages);
+  const start = (state.accountPage - 1) * ACCOUNT_PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + ACCOUNT_PAGE_SIZE);
+  renderAccounts(pageItems, {
+    total: filtered.length,
+    page: state.accountPage,
+    totalPages,
+    start,
+    end: start + pageItems.length
+  });
+  renderAccountPagination(filtered.length, state.accountPage, totalPages, start, pageItems.length);
+}
+
+function renderAccountPagination(total, page, totalPages, start, pageLength) {
+  const pagination = $('accountPagination');
+  if (!pagination) return;
+  const hasPagination = total > ACCOUNT_PAGE_SIZE;
+  show(pagination, hasPagination);
+  if (!hasPagination) return;
+  const summary = $('accountPaginationSummary');
+  if (summary) summary.textContent = `显示 ${start + 1}–${start + pageLength} / ${total} 个账号`;
+  const pageStatus = $('accountPageStatus');
+  if (pageStatus) pageStatus.textContent = `第 ${page} / ${totalPages} 页`;
+  const previous = $('accountPrevPage');
+  if (previous) previous.disabled = page <= 1;
+  const next = $('accountNextPage');
+  if (next) next.disabled = page >= totalPages;
 }
 
 function manageAccountCanBatch(item, now = Date.now()) {
@@ -496,6 +548,7 @@ function parseManageAccountRaw(raw, source = '手动粘贴') {
     lastPaymentCountry: '',
     lastResultUrl: '',
     lastCheckedAt: 0,
+    addedAt: Date.now(),
     updatedAt: Date.now()
   };
 }
@@ -522,6 +575,7 @@ function upsertManageAccount(entry) {
       kind: entry.kind || previous.kind,
       source: entry.source || previous.source,
       label: previous.label || entry.label,
+      addedAt: accountTimestamp(previous.addedAt || entry.addedAt || Date.now()),
       updatedAt: Date.now()
     };
     return {entry: state.accounts[index], added: false};
@@ -565,6 +619,7 @@ function persistManageAccounts() {
       lastPaymentCountry: String(item.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8),
       lastResultUrl: String(item.lastResultUrl || '').slice(0, 2000),
       lastCheckedAt: Number(item.lastCheckedAt || 0),
+      addedAt: accountTimestamp(item.addedAt || item.createdAt || item.joinedAt || item.updatedAt || Date.now()),
       updatedAt: Number(item.updatedAt || Date.now())
     }))
   };
@@ -578,6 +633,7 @@ function persistManageAccounts() {
 function refreshManageAccountState() {
   const payload = parseStorage(ACCOUNT_STORAGE_KEY) || {};
   state.accounts = localAccountList();
+  state.accountPage = 1;
   state.activeAccountId = String(payload.activeId || '');
   if (!state.accounts.some(item => item.id === state.activeAccountId)) {
     state.activeAccountId = state.accounts[0]?.id || '';
@@ -755,12 +811,96 @@ function setManageDetectionStatus(value, isError = false) {
   setMessage($('manageDetectionStatus'), value, isError);
 }
 
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.max(1, Math.floor(parsed)) : fallback;
+}
+
+function manageDetectionWorkerLimit() {
+  return positiveInteger(state.taskLimits?.workers, DEFAULT_TASK_LIMITS.workers);
+}
+
+function clampManageDetectionConcurrency(value) {
+  return Math.min(
+    manageDetectionWorkerLimit(),
+    Math.max(1, positiveInteger(value, DEFAULT_MANAGE_DETECTION_CONCURRENCY))
+  );
+}
+
+function manageDetectionConcurrencyLimit() {
+  const input = $('manageDetectConcurrency');
+  const requested = Number(input?.value);
+  const value = clampManageDetectionConcurrency(
+    Number.isFinite(requested) && requested > 0 ? requested : state.detectionConcurrency
+  );
+  state.detectionConcurrency = value;
+  if (input) input.value = String(value);
+  return value;
+}
+
+function syncManageDetectionConcurrency() {
+  const input = $('manageDetectConcurrency');
+  const value = clampManageDetectionConcurrency(state.detectionConcurrency);
+  state.detectionConcurrency = value;
+  if (input) {
+    input.max = String(manageDetectionWorkerLimit());
+    input.value = String(value);
+  }
+  const note = $('manageDetectionConcurrencyNote');
+  if (note) {
+    const recommended = Math.min(
+      positiveInteger(state.taskLimits?.perIp, DEFAULT_TASK_LIMITS.perIp),
+      manageDetectionWorkerLimit()
+    );
+    note.textContent = `当前并发 ${value}；服务端 worker 上限 ${manageDetectionWorkerLimit()}，单 IP 每分钟最多创建 ${positiveInteger(state.taskLimits?.perIp, DEFAULT_TASK_LIMITS.perIp)} 个任务，建议并发 ${recommended}。`;
+  }
+}
+
+function loadManageDetectionConcurrencyPreference() {
+  try {
+    const stored = Number(localStorage.getItem(MANAGE_DETECTION_CONCURRENCY_KEY));
+    if (Number.isFinite(stored) && stored > 0) state.detectionConcurrency = stored;
+  } catch (_) {
+    // 浏览器禁用 localStorage 时继续使用默认并发数。
+  }
+}
+
+function persistManageDetectionConcurrency() {
+  try {
+    localStorage.setItem(MANAGE_DETECTION_CONCURRENCY_KEY, String(state.detectionConcurrency));
+  } catch (_) {
+    // 并发设置不影响检测任务本身，存储失败时仅对当前页面生效。
+  }
+}
+
+function updateManageDetectionConcurrency() {
+  manageDetectionConcurrencyLimit();
+  persistManageDetectionConcurrency();
+  syncManageDetectionConcurrency();
+}
+
+async function loadManageTaskLimits() {
+  try {
+    const response = await api('/api/config');
+    const limits = response.task_limits || {};
+    state.taskLimits = {
+      perIp: positiveInteger(limits.per_ip_rpm, DEFAULT_TASK_LIMITS.perIp),
+      global: positiveInteger(limits.global_rpm, DEFAULT_TASK_LIMITS.global),
+      workers: positiveInteger(limits.workers, DEFAULT_TASK_LIMITS.workers)
+    };
+  } catch (_) {
+    state.taskLimits = {...DEFAULT_TASK_LIMITS};
+  }
+  syncManageDetectionConcurrency();
+}
+
 function manageDetectionTerminal(status) {
   return ['done', 'error', 'cancelled'].includes(String(status || ''));
 }
 
 function manageDetectionStatusLabel(status) {
   return {
+    pending: '等待槽位',
     creating: '创建中',
     waiting: '等待创建窗口',
     queued: '排队中',
@@ -778,7 +918,10 @@ function renderManageDetectionJobs() {
   list.hidden = !state.detectionJobs.length;
   state.detectionJobs.forEach(job => {
     const row = document.createElement('div');
-    row.className = `manage-detection-job is-${manageDetectionTerminal(job.status) ? job.status : 'running'}`;
+    const stateClass = manageDetectionTerminal(job.status)
+      ? job.status
+      : job.status === 'pending' ? 'pending' : 'running';
+    row.className = `manage-detection-job is-${stateClass}`;
     const main = document.createElement('div');
     main.className = 'manage-detection-job-main';
     const title = document.createElement('b');
@@ -985,6 +1128,41 @@ async function pollManageDetectionJob(job) {
   throw new Error('协议检测轮询超时');
 }
 
+async function runManageDetectionJob(job, entryProxies, exitProxies) {
+  const account = state.accounts.find(item => item.id === job.accountId);
+  if (!account) return;
+  try {
+    await createManageDetectionJob(job, manageDetectionPayload(account, entryProxies, exitProxies));
+    await pollManageDetectionJob(job);
+  } catch (error) {
+    job.status = 'error';
+    job.percent = 100;
+    job.error = error.message || String(error);
+    job.text = '检测失败';
+    manageRecordDetectionOutcome(job, {status: 'error', error: job.error});
+    renderManageDetectionJobs();
+  }
+}
+
+async function runManageDetectionPool(entryProxies, exitProxies) {
+  let nextIndex = 0;
+  const active = new Set();
+  const launchAvailable = () => {
+    const limit = manageDetectionConcurrencyLimit();
+    while (nextIndex < state.detectionJobs.length && active.size < limit) {
+      const job = state.detectionJobs[nextIndex++];
+      const task = runManageDetectionJob(job, entryProxies, exitProxies).finally(() => active.delete(task));
+      active.add(task);
+    }
+  };
+
+  while (nextIndex < state.detectionJobs.length || active.size) {
+    launchAvailable();
+    if (!active.size) continue;
+    await Promise.race(active);
+  }
+}
+
 async function startManageProtocolDetection(accountIds) {
   if (state.detectionRunning) return;
   const accounts = state.accounts.filter(item => accountIds.includes(item.id) && manageAccountCanBatch(item));
@@ -1004,30 +1182,17 @@ async function startManageProtocolDetection(accountIds) {
     accountId: account.id,
     label: account.label || account.email || account.accountId,
     jobId: '',
-    status: 'creating',
+    status: 'pending',
     percent: 0,
-    text: '等待创建',
+    text: '等待并发槽位',
     error: ''
   }));
   renderManageDetectionJobs();
   updateManageAccountControls();
-  setManageDetectionStatus(`正在检测 ${accounts.length} 个账号，使用${detectionProxies.label}；结果会自动写回本机账号库。`);
+  const concurrency = manageDetectionConcurrencyLimit();
+  setManageDetectionStatus(`正在检测 ${accounts.length} 个账号（并发 ${concurrency}），使用${detectionProxies.label}；结果会自动写回本机账号库。`);
   try {
-    for (const job of state.detectionJobs) {
-      const account = state.accounts.find(item => item.id === job.accountId);
-      if (!account) continue;
-      try {
-        await createManageDetectionJob(job, manageDetectionPayload(account, detectionProxies.entryProxies, detectionProxies.exitProxies));
-        await pollManageDetectionJob(job);
-      } catch (error) {
-        job.status = 'error';
-        job.percent = 100;
-        job.error = error.message || String(error);
-        job.text = '检测失败';
-        manageRecordDetectionOutcome(job, {status: 'error', error: job.error});
-        renderManageDetectionJobs();
-      }
-    }
+    await runManageDetectionPool(detectionProxies.entryProxies, detectionProxies.exitProxies);
     const done = state.detectionJobs.filter(job => job.status === 'done').length;
     const failed = state.detectionJobs.length - done;
     setManageDetectionStatus(`协议检测结束：${done} 个完成${failed ? ` · ${failed} 个失败` : ''}。` , Boolean(failed));
@@ -1361,7 +1526,7 @@ async function loadLogs() {
 async function loadAll() {
   setMessage($('manageGlobalMessage'), '正在同步管理数据…');
   try {
-    await Promise.all([loadSummary(), loadAccounts(), loadProxies(), loadBilling(), loadAddresses(), loadAsn(), loadSuccesses(), loadLogs()]);
+    await Promise.all([loadSummary(), loadAccounts(), loadProxies(), loadBilling(), loadAddresses(), loadAsn(), loadSuccesses(), loadLogs(), loadManageTaskLimits()]);
     setMessage($('manageGlobalMessage'), '数据已更新。');
     window.setTimeout(() => setMessage($('manageGlobalMessage'), ''), 1800);
   } catch (error) {
@@ -1601,9 +1766,25 @@ function bindEvents() {
   $('addressCountryFilter').addEventListener('change', loadAddresses);
   $('addressTypeFilter').addEventListener('change', loadAddresses);
   $('refreshAccounts').addEventListener('click', loadAccounts);
-  ['accountQuery', 'accountPromoFilter', 'accountRiskFilter', 'accountMethodFilter'].forEach((id) => {
-    $(id)?.addEventListener('input', renderFilteredAccounts);
-    $(id)?.addEventListener('change', renderFilteredAccounts);
+  ['accountQuery', 'accountProtocolFilter', 'accountPromoFilter', 'accountRiskFilter', 'accountMethodFilter'].forEach((id) => {
+    const resetAccountPage = () => {
+      state.accountPage = 1;
+      renderFilteredAccounts();
+    };
+    $(id)?.addEventListener('input', resetAccountPage);
+    $(id)?.addEventListener('change', resetAccountPage);
+  });
+  $('accountPrevPage')?.addEventListener('click', () => {
+    if (state.accountPage <= 1) return;
+    state.accountPage -= 1;
+    renderFilteredAccounts();
+  });
+  $('accountNextPage')?.addEventListener('click', () => {
+    const total = state.accounts.filter(accountMatchesFilters).length;
+    const totalPages = Math.max(1, Math.ceil(total / ACCOUNT_PAGE_SIZE));
+    if (state.accountPage >= totalPages) return;
+    state.accountPage += 1;
+    renderFilteredAccounts();
   });
   $('manageImportPaste')?.addEventListener('click', importManagePastedAccounts);
   $('manageAccountFileInput')?.addEventListener('change', async (event) => {
@@ -1628,6 +1809,8 @@ function bindEvents() {
   $('manageDetectSelected')?.addEventListener('click', () => {
     void startManageProtocolDetection(manageSelectedAccounts().map(item => item.id));
   });
+  $('manageDetectConcurrency')?.addEventListener('input', updateManageDetectionConcurrency);
+  $('manageDetectConcurrency')?.addEventListener('change', updateManageDetectionConcurrency);
   $('manageDetectProxyMode')?.addEventListener('change', syncManageDetectionProxyMode);
   $('refreshAsn').addEventListener('click', loadAsn);
   $('refreshSuccesses').addEventListener('click', loadSuccesses);
@@ -1640,6 +1823,8 @@ function bindEvents() {
 
 async function bootstrap() {
   initializeTheme();
+  loadManageDetectionConcurrencyPreference();
+  syncManageDetectionConcurrency();
   $('logDay').value = new Date().toISOString().slice(0, 10);
   bindEvents();
   try {

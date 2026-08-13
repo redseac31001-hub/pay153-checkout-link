@@ -7,7 +7,7 @@
   <title>PAY.153 · 管理中心</title>
   <meta name="description" content="PAY.153 本地代理池、账单档案、ASN 推荐与成功节点管理中心">
   <link rel="stylesheet" href="/static/styles.css?v=20260813-account-workbench-ui01">
-  <link rel="stylesheet" href="/static/manage.css?v=20260813-account-workbench-ui01">
+  <link rel="stylesheet" href="/static/manage.css?v=20260813-manage-concurrency-v1">
 </head>
 <body class="manage-page">
   <div class="paper-noise"></div>
@@ -110,7 +110,11 @@
               <section class="panel account-ops-card account-detection-card">
                 <div class="account-ops-heading"><div><span class="section-index">P</span><div><h3>OAICS / CS 协议检测</h3><p>固定检测 DE / EUR PayPal Checkout，并记录协议到账号。</p></div></div><span class="protocol-detection-mark">DE / EUR</span></div>
                 <div class="manage-detection-source">
-                  <label class="field"><span>检测代理来源</span><select id="manageDetectProxyMode"><option value="pool">已保存代理池</option><option value="local">本地代理</option><option value="manual">手工编辑代理池</option></select></label>
+                  <div class="form-grid form-grid-2 manage-detection-source-grid">
+                    <label class="field"><span>检测代理来源</span><select id="manageDetectProxyMode"><option value="pool">已保存代理池</option><option value="local">本地代理</option><option value="manual">手工编辑代理池</option></select></label>
+                    <label class="field"><span>并发检测数</span><input id="manageDetectConcurrency" type="number" inputmode="numeric" min="1" max="20" step="1" value="3"></label>
+                  </div>
+                  <p id="manageDetectionConcurrencyNote" class="manage-detection-config-note">默认并发 3；服务端上限同步后可动态调整。</p>
                 </div>
                 <div id="manageDetectionPoolFields" class="form-grid form-grid-2 account-detection-fields">
                   <label class="field"><span>入口代理池</span><select id="manageDetectEntryPool"><option value="">先维护入口代理池</option></select></label>
@@ -134,6 +138,7 @@
             </div>
             <div class="filter-bar panel">
               <label class="filter-wide"><span>搜索</span><input id="accountQuery" placeholder="邮箱、账号 ID、来源或任务"></label>
+              <label><span>协议</span><select id="accountProtocolFilter"><option value="">全部</option><option value="unknown">未检测</option><option value="oaics">OAICS</option><option value="cs">CS</option></select></label>
               <label><span>优惠</span><select id="accountPromoFilter"><option value="">全部</option><option value="supported">支持</option><option value="unsupported">不支持 / 未生效</option><option value="unknown">未检测</option></select></label>
               <label><span>风险</span><select id="accountRiskFilter"><option value="">全部</option><option value="clear">未发现拒绝</option><option value="rejected">最近被拒</option><option value="cooldown">本机冷却</option><option value="blocked">疑似封禁</option><option value="frozen">冻结（连续 block）</option><option value="unknown">未检测</option></select></label>
               <label><span>支付方式</span><select id="accountMethodFilter"><option value="">全部</option><option value="paypal">PayPal</option><option value="gopay">Gopay</option><option value="ideal">iDEAL</option><option value="upi">UPI</option><option value="pix">PIX</option><option value="card">Card</option></select></label>
@@ -141,6 +146,14 @@
             </div>
             <div class="section-heading compact"><div><h3>当前浏览器账号</h3><p>协议检测结果按 DE/EUR 记录；“疑似封禁”仅表示响应出现明确账号封禁信号，不代表永久结论。</p></div><span id="accountListMeta" class="section-status">0 个账号</span></div>
             <div class="table-card panel"><div class="table-scroll"><table class="account-status-table"><thead><tr><th>选择</th><th>账号</th><th>协议</th><th>有效期</th><th>优惠资格</th><th>支付方式</th><th>拒绝 / 封禁</th><th>最近检测 / 地区</th><th>来源 / 任务</th><th>操作</th></tr></thead><tbody id="accountTable"></tbody></table></div><div id="accountEmpty" class="table-state" hidden></div></div>
+            <div id="accountPagination" class="account-pagination" hidden>
+              <span id="accountPaginationSummary" class="account-pagination-summary"></span>
+              <div class="account-pagination-controls" role="navigation" aria-label="账号列表分页">
+                <button id="accountPrevPage" class="table-action" type="button">上一页</button>
+                <span id="accountPageStatus" class="account-page-status" aria-live="polite">第 1 / 1 页</span>
+                <button id="accountNextPage" class="table-action" type="button">下一页</button>
+              </div>
+            </div>
           </section>
 
           <section class="manage-section" data-panel="proxies" hidden>
@@ -229,6 +242,6 @@
   </main>
 
   <footer><span>PAY.153.INK</span><p>管理中心只建议在受控的本地网络中开放。</p></footer>
-  <script src="/static/manage.js?v=20260813-account-workbench-ui01"></script>
+  <script src="/static/manage.js?v=20260813-manage-concurrency-v1"></script>
 </body>
 </html>

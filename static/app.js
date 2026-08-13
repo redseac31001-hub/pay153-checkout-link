@@ -1031,6 +1031,7 @@ function parseAccountRaw(raw, sourceLabel=''){
     lastPaymentCountry: '',
     lastResultUrl: '',
     lastCheckedAt: 0,
+    addedAt: Date.now(),
     updatedAt: Date.now()
   };
 }
@@ -1209,6 +1210,7 @@ function persistAccounts(){
       lastPaymentCountry: String(entry.lastPaymentCountry || '').trim().toUpperCase().slice(0, 8),
       lastResultUrl: String(entry.lastResultUrl || '').slice(0, 2000),
       lastCheckedAt: Number(entry.lastCheckedAt || 0),
+      addedAt: Number(entry.addedAt || entry.createdAt || entry.joinedAt || entry.updatedAt || Date.now()),
       updatedAt: Number(entry.updatedAt || Date.now())
     }))
   };
@@ -1237,6 +1239,7 @@ function loadAccountsFromStorage(){
       entry.lastDeclineAt = Number(item.lastDeclineAt || 0);
       entry.consecutiveDeclines = Number(item.consecutiveDeclines || 0);
       restoreAccountStatus(entry, item);
+      entry.addedAt = Number(item.addedAt || item.createdAt || item.joinedAt || item.updatedAt || entry.addedAt || Date.now());
       entry.updatedAt = Number(item.updatedAt || Date.now());
       if (item.label) entry.label = String(item.label);
       accountEntries.push(entry);
@@ -1783,6 +1786,7 @@ function upsertAccountEntry(entry){
     entry.lastDeclineAt = Number(old.lastDeclineAt || entry.lastDeclineAt || 0);
     entry.consecutiveDeclines = Number(old.consecutiveDeclines || entry.consecutiveDeclines || 0);
     restoreAccountStatus(entry, old);
+    entry.addedAt = Number(old.addedAt || old.createdAt || old.joinedAt || entry.addedAt || Date.now());
     entry.updatedAt = Date.now();
     accountEntries[existingIndex] = entry;
     return {entry, added: false};
