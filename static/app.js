@@ -1272,14 +1272,53 @@ function getBatchSelectedAccounts(){
   return accountEntries.filter(entry => batchSelectedAccountIds.has(entry.id) && accountCanBatch(entry, now));
 }
 
+function updateExecutionControls(selectedAccounts=getBatchSelectedAccounts()){
+  const selectedList = Array.isArray(selectedAccounts) ? selectedAccounts : [];
+  const selectedCount = selectedList.length;
+  const submitButton = $('submitButton');
+  const submitLabel = submitButton?.querySelector('span');
+  const tokenField = $('token');
+  const executionHint = $('accountExecutionHint');
+  const gatewayHint = $('accountGatewaySelectionHint');
+  const selectedEntry = selectedList[0];
+
+  if (selectedCount >= 2) {
+    if (submitLabel) submitLabel.textContent = `并发提链（${selectedCount} 个已选）`;
+    if (submitButton) {
+      submitButton.title = `并发执行已勾选的 ${selectedCount} 个账号；输入框内容不会作为本次任务目标`;
+      submitButton.dataset.executionMode = 'batch';
+    }
+    if (tokenField) tokenField.required = false;
+    if (gatewayHint) gatewayHint.textContent = `已选 ${selectedCount} 个可用账号；底部按钮和“并发提链”都会执行这些账号，每个账号独立建任务。`;
+    if (executionHint) executionHint.textContent = `并发模式：将执行已勾选的 ${selectedCount} 个账号，不读取输入框内容。`;
+  } else if (selectedCount === 1) {
+    if (submitLabel) submitLabel.textContent = '开始提链（已选账号）';
+    if (submitButton) {
+      submitButton.title = `执行已勾选账号：${selectedEntry?.label || '当前账号'}；输入框内容不会覆盖该选择`;
+      submitButton.dataset.executionMode = 'single-selected';
+    }
+    if (tokenField) tokenField.required = false;
+    if (gatewayHint) gatewayHint.textContent = `已选 1 个可用账号：${selectedEntry?.label || '当前账号'}；底部按钮将执行该账号。`;
+    if (executionHint) executionHint.textContent = `单账号模式：将执行已勾选的“${selectedEntry?.label || '当前账号'}”，输入框内容不会覆盖该选择。`;
+  } else {
+    if (submitLabel) submitLabel.textContent = '开始提链（输入框账号）';
+    if (submitButton) {
+      submitButton.title = '执行下方输入框中的单个 Token';
+      submitButton.dataset.executionMode = 'manual';
+    }
+    if (tokenField) tokenField.required = true;
+    if (gatewayHint) gatewayHint.textContent = '未勾选账号：底部按钮执行输入框中的账号；勾选后会自动切换为所选账号模式。';
+    if (executionHint) executionHint.textContent = '当前为单账号模式：开始提链将执行输入框中的账号。';
+  }
+  if (executionHint) {
+    executionHint.classList.toggle('is-selection', selectedCount > 0);
+    executionHint.classList.toggle('is-batch', selectedCount >= 2);
+  }
+  if (submitButton) submitButton.disabled = Boolean(activeRunMode);
+}
+
 function updateBatchControls(){
   const selectedCount = getBatchSelectedAccounts().length;
-  const gatewayHint = $('accountGatewaySelectionHint');
-  if (gatewayHint) {
-    gatewayHint.textContent = selectedCount
-      ? `已选 ${selectedCount} 个可用账号；每个账号独立创建任务，结果不会互相覆盖。`
-      : '选择的账号会从管理中心同步到这里，每个账号独立创建任务。';
-  }
   const batchButton = $('accountBatchRun');
   if (batchButton) {
     batchButton.textContent = `并发提链（${selectedCount}）`;
@@ -1299,6 +1338,7 @@ function updateBatchControls(){
     selectAll.disabled = !available.length || Boolean(activeRunMode);
     selectAll.textContent = allSelected ? '取消全选' : '全选可用';
   }
+  updateExecutionControls(getBatchSelectedAccounts());
 }
 
 function formatAccountExpiry(entry){
@@ -1473,13 +1513,13 @@ function renderAccountList(){
 
       const selectWrap = document.createElement('label');
       selectWrap.className = 'account-batch-select';
-      selectWrap.title = available ? '加入并发提链' : (frozen ? '账号冻结中' : (cooling ? '账号冷却中' : '账号已过期'));
+      selectWrap.title = available ? '加入本次执行选择（1 个=单账号，2 个以上=并发）' : (frozen ? '账号冻结中' : (cooling ? '账号冷却中' : '账号已过期'));
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.className = 'account-batch-check';
       checkbox.checked = batchSelectedAccountIds.has(entry.id);
       checkbox.disabled = !available;
-      checkbox.setAttribute('aria-label', `选择 ${entry.label} 并发提链`);
+      checkbox.setAttribute('aria-label', `选择 ${entry.label} 作为提链执行账号`);
       checkbox.addEventListener('click', event => event.stopPropagation());
       checkbox.addEventListener('change', () => {
         if (checkbox.checked) batchSelectedAccountIds.add(entry.id);
@@ -1492,7 +1532,7 @@ function renderAccountList(){
       const main = document.createElement('button');
       main.type = 'button';
       main.className = 'account-chip-main';
-      main.title = '点击选用此账号';
+      main.title = '点击选用此账号并填入输入框';
       main.setAttribute('aria-pressed', String(entry.id === activeAccountId));
       const title = document.createElement('span');
       title.className = 'account-chip-title';
@@ -1717,8 +1757,8 @@ function markActiveAccountCooldown(ms=ACCOUNT_COOLDOWN_MS, reason=''){
   return markAccountCooldown(target, ms, reason);
 }
 
-function getActiveAccountCooldownBlocker(){
-  const tokenRaw = String($('token')?.value || '').trim();
+function getActiveAccountCooldownBlocker(tokenValue=''){
+  const tokenRaw = String(tokenValue || $('token')?.value || '').trim();
   if (!tokenRaw) return null;
   let parsed = null;
   try{ parsed = parseAccountRaw(tokenRaw, 'submit-check'); }catch{ /* 交给后端 */ }
@@ -2174,7 +2214,7 @@ function buildCheckoutBody(tokenValue, overrides={}){
   return body;
 }
 
-function validateCheckoutOptions({batch=false}={}){
+function validateCheckoutOptions({batch=false, tokenValue=''}={}){
   const linkType = selected('link_type');
   const billingProfile = linkType === 'gopay' ? readBillingProfile() : null;
   const paypalBillingSelection = readPaypalBillingSelection();
@@ -2198,7 +2238,7 @@ function validateCheckoutOptions({batch=false}={}){
     return false;
   }
   if (!batch) {
-    const cooldownBlocker = getActiveAccountCooldownBlocker();
+    const cooldownBlocker = getActiveAccountCooldownBlocker(tokenValue);
     if (cooldownBlocker) {
       const frozen = isAccountFrozen(cooldownBlocker);
       setProgress(
@@ -2662,8 +2702,19 @@ async function startBatchProtocolDetection(){
   }
 }
 
-async function startSingleCheckout(){
-  if (!validateCheckoutOptions()) return;
+async function startSingleCheckout(selectedEntry=null){
+  const submittedToken = selectedEntry
+    ? String(selectedEntry.raw || selectedEntry.token || '').trim()
+    : String($('token').value || '').trim();
+  if (!submittedToken) {
+    setAccountImportStatus(
+      selectedEntry ? '所选账号没有可用 Token，请重新导入账号' : '请先在输入框粘贴一个 Access Token / Session JSON',
+      'error'
+    );
+    $('token')?.focus();
+    return;
+  }
+  if (!validateCheckoutOptions({tokenValue: submittedToken})) return;
   resetProgress();
   $('resultPanel').hidden = true;
   $('batchPanel').hidden = true;
@@ -2672,11 +2723,10 @@ async function startSingleCheckout(){
   logAutoFollow = true;
   setRunning(true, 'single');
   setProgress(3, '提交任务', 'running');
-  const submittedToken = String($('token').value || '').trim();
-  const submittedEntry = findAccountForToken(submittedToken, true);
+  const accountEntry = selectedEntry || findAccountForToken(submittedToken, true);
   singleJobBinding = {
-    entry: submittedEntry,
-    entryId: submittedEntry?.id || '',
+    entry: accountEntry,
+    entryId: accountEntry?.id || '',
     requestedMethod: selected('link_type'),
     token: submittedToken
   };
@@ -2732,7 +2782,14 @@ async function startBatchCheckout(){
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (activeRunMode) return;
-  await startSingleCheckout();
+  const selectedAccounts = getBatchSelectedAccounts();
+  if (selectedAccounts.length >= 2) {
+    await startBatchCheckout();
+  } else if (selectedAccounts.length === 1) {
+    await startSingleCheckout(selectedAccounts[0]);
+  } else {
+    await startSingleCheckout();
+  }
 });
 
 $('cancelButton').addEventListener('click', async () => {

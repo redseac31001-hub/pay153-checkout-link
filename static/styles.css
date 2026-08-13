@@ -148,6 +148,9 @@ select{cursor:pointer}
 .account-manager-link{flex:none;padding:8px 11px;border:1px solid rgba(109,74,255,.28);border-radius:9px;color:var(--brand);background:var(--surface);font-size:10px;font-weight:800;text-decoration:none;transition:.18s}
 .account-manager-link:hover{border-color:var(--brand);transform:translateY(-1px)}
 .account-workbench-selection{margin:0 0 10px}.account-workbench-selection-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 2px 7px}.account-selection-note{color:var(--faint);font-size:10px}.account-chip.is-batch-selected{border-color:rgba(5,169,199,.52);box-shadow:0 0 0 3px rgba(5,169,199,.08);background:rgba(5,169,199,.035)}
+.account-execution-hint{display:block;margin-top:9px;padding:8px 10px;border:1px solid rgba(109,74,255,.18);border-radius:9px;color:var(--brand);background:rgba(109,74,255,.055);font-size:11px;line-height:1.5}
+.account-execution-hint.is-selection{border-color:rgba(5,169,199,.28);color:#087d91;background:rgba(5,169,199,.065)}
+.account-execution-hint.is-batch{border-color:rgba(109,74,255,.28);color:var(--brand);background:rgba(109,74,255,.085)}
 .account-list{
   display:grid;gap:8px;max-height:240px;overflow:auto;
   margin:0 0 10px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--surface-2)
@@ -347,7 +350,7 @@ textarea::-webkit-scrollbar-corner,.log-box::-webkit-scrollbar-corner{background
 .dark textarea::placeholder,.dark input::placeholder{color:#58667e}
 .dark .token-field textarea{background:linear-gradient(145deg,#0c1421,#101a29)}
 .dark .account-list{background:#0d1522;border-color:#253249}.dark .account-list-hint{color:#718099}
-.dark .account-manager-gateway{border-color:rgba(138,114,255,.30);background:linear-gradient(100deg,rgba(138,114,255,.12),rgba(40,194,221,.06))}.dark .account-manager-link{background:#111b2b;color:#cbb8ff;border-color:rgba(138,114,255,.35)}
+.dark .account-manager-gateway{border-color:rgba(138,114,255,.30);background:linear-gradient(100deg,rgba(138,114,255,.12),rgba(40,194,221,.06))}.dark .account-manager-link{background:#111b2b;color:#cbb8ff;border-color:rgba(138,114,255,.35)}.dark .account-execution-hint.is-selection{color:#6ce0ee;background:rgba(40,194,221,.09)}.dark .account-execution-hint.is-batch{color:#d1c4ff;background:rgba(138,114,255,.12)}
 .dark .account-protocol-group{background:rgba(17,27,43,.58)}.dark .account-protocol-group.is-oaics{border-color:rgba(138,114,255,.30)}.dark .account-protocol-group.is-cs{border-color:rgba(40,194,221,.30)}.dark .account-protocol-group.is-unknown{border-color:rgba(113,128,153,.42)}
 .dark .account-chip{background:#111b2b;border-color:#253249}
 .dark .account-chip.is-active{background:rgba(109,74,255,.12)}

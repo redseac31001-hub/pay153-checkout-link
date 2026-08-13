@@ -43,6 +43,7 @@ const appJs = fs.readFileSync('static/app.js', 'utf8');
 const accounts = JSON.parse(process.env.FAKE_ACCOUNTS);
 const accountStorage = {version: 1, activeId: accounts[0].id, selectedIds: [], accounts};
 let checkoutCalls = 0;
+const checkoutBodies = [];
 
 (async () => {
   const manageDom = new JSDOM(manageHtml, {url: 'http://localhost/manage#accounts', runScripts: 'outside-only'});
@@ -100,6 +101,7 @@ let checkoutCalls = 0;
     }
     if (path.endsWith('/api/checkout')) {
       checkoutCalls += 1;
+      checkoutBodies.push(JSON.parse(init.body || '{}'));
       const id = `manage-workbench-job-${checkoutCalls}`;
       return {ok: true, status: 202, json: async () => ({job_id: id, queue_position: 0})};
     }
@@ -119,13 +121,29 @@ let checkoutCalls = 0;
   if (checks.length !== 2 || checks.some(check => !check.checked)) throw new Error('management selections did not appear in workbench');
   const batchButton = window.document.getElementById('accountBatchRun');
   if (batchButton.disabled || !batchButton.textContent.includes('2')) throw new Error('workbench batch button is not enabled for synced selection');
+  const primaryButton = window.document.getElementById('submitButton');
+  if (!primaryButton.textContent.includes('并发提链（2 个已选）')) throw new Error('primary button did not reflect batch selection');
   window.document.getElementById('entryProxy').value = 'http://127.0.0.1:8080';
   window.document.getElementById('exitProxy').value = 'http://127.0.0.1:8081';
+  checks[1].checked = false;
+  checks[1].dispatchEvent(new window.Event('change', {bubbles: true}));
+  await wait(20);
+  if (!primaryButton.textContent.includes('开始提链（已选账号）')) throw new Error('primary button did not switch to selected-account mode');
+  window.document.getElementById('token').value = '';
+  window.document.getElementById('checkoutForm').dispatchEvent(new window.Event('submit', {bubbles: true, cancelable: true}));
+  await wait(30);
+  if (checkoutCalls !== 1) throw new Error(`selected-account single submit did not create one task: ${checkoutCalls}`);
+  const singleBody = checkoutBodies[0] || {};
+  if (singleBody.token !== accounts[0].raw) throw new Error('single submit used the textarea token instead of the selected account');
+  const refreshedChecks = [...window.document.querySelectorAll('.account-batch-check')];
+  refreshedChecks[1].checked = true;
+  refreshedChecks[1].dispatchEvent(new window.Event('change', {bubbles: true}));
+  await wait(20);
   await window.startBatchCheckout();
   await wait(30);
-  if (checkoutCalls !== 2) throw new Error(`expected two concurrent checkout calls, got ${checkoutCalls}`);
+  if (checkoutCalls !== 3) throw new Error(`expected one single and two concurrent checkout calls, got ${checkoutCalls}`);
   if (!window.document.getElementById('batchSummary').textContent.includes('2 个完成')) throw new Error('batch result did not converge');
-  console.log(JSON.stringify({ok: true, emailReveal: true, synced: 2, checkoutCalls}));
+  console.log(JSON.stringify({ok: true, emailReveal: true, synced: 2, selectedSingle: true, checkoutCalls}));
 })().catch(error => {
   console.error(error && error.stack || error);
   process.exit(1);

@@ -51,7 +51,7 @@
           <div class="field token-field account-manager">
             <span class="label-row"><b>Access Token / Session JSON</b><small id="tokenHint">自动识别账号信息 · 本机保存</small></span>
             <div class="account-manager-gateway">
-              <div class="account-manager-gateway-main"><b>账号库在管理中心维护 · 工作台支持并发提链</b><small id="accountGatewaySelectionHint">选择的账号会从管理中心同步到这里，每个账号独立创建任务。</small></div>
+              <div class="account-manager-gateway-main"><b>账号库在管理中心维护 · 工作台按选择执行</b><small id="accountGatewaySelectionHint">未勾选时，底部按钮执行输入框中的账号；勾选后按选择数量执行。</small></div>
               <div class="account-manager-gateway-actions">
                 <button id="accountSelectAll" type="button" class="ghost-button account-toolbar-btn" disabled>全选可用</button>
                 <button id="accountBatchRun" type="button" class="account-batch-button" disabled>并发提链（0）</button>
@@ -59,7 +59,7 @@
               </div>
             </div>
             <div class="account-workbench-selection">
-              <div class="account-workbench-selection-head"><span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span><span class="account-selection-note">复选框用于批量提链</span></div>
+              <div class="account-workbench-selection-head"><span id="accountImportStatus" class="account-import-status">本机保存 · 与账号绑定冷却</span><span class="account-selection-note">0 个=输入框 · 1 个=单账号 · 2+ 个=并发</span></div>
               <div id="accountList" class="account-list" hidden></div>
               <div id="accountListHint" class="account-list-hint" hidden></div>
             </div>
@@ -74,7 +74,8 @@
               </div>
             </div>
             <textarea id="token" name="token" required autocomplete="off" spellcheck="false" placeholder="可直接粘贴一个 AT 提交；或粘贴多个 AT 后点“导入粘贴内容”"></textarea>
-            <span class="field-note">这里仍支持临时手动提交单个 Token；账号导入、协议检测和账号维护请前往管理中心。工作台的复选框可多选账号并发提链。</span>
+            <span class="field-note">可直接粘贴 Token 手动提交；账号导入、协议检测和账号维护请前往管理中心。勾选账号后，底部按钮会按勾选结果执行。</span>
+            <span id="accountExecutionHint" class="account-execution-hint" role="status" aria-live="polite">当前为单账号模式：开始提链将执行输入框中的账号。</span>
           </div>
 
         <details class="field-group collapsible-group" id="planSection" open>
@@ -251,7 +252,7 @@
         </div>
 
         <div class="form-actions">
-          <button id="submitButton" class="primary-button" type="submit"><span>开始提炼</span><i>→</i></button>
+          <button id="submitButton" class="primary-button" type="submit" title="执行下方输入框中的单个 Token"><span>开始提链（输入框账号）</span><i>→</i></button>
           <button id="cancelButton" class="secondary-button" type="button" hidden>停止任务</button>
         </div>
       </form>
