@@ -9,6 +9,12 @@ const STORAGE_KEYS = {
 };
 const ACCOUNT_STORAGE_KEY = 'pay153.accounts.v1';
 const ACCOUNT_PAGE_SIZE = 20;
+const ACCOUNT_LIFECYCLES = ['active', 'completed', 'deleted'];
+const ACCOUNT_LIFECYCLE_LABELS = {
+  active: '正常',
+  completed: '已完成',
+  deleted: '已注销/删除'
+};
 const MANAGE_DETECTION_CONCURRENCY_KEY = 'pay153.manage.detection.concurrency.v1';
 const DEFAULT_MANAGE_DETECTION_CONCURRENCY = 3;
 const DEFAULT_TASK_LIMITS = {perIp: 3, global: 20, workers: 20};
@@ -90,6 +96,17 @@ function accountTimestamp(value) {
   return timestamp < 100000000000 ? timestamp * 1000 : timestamp;
 }
 
+function normalizeAccountLifecycle(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ACCOUNT_LIFECYCLES.includes(normalized) ? normalized : 'active';
+}
+
+function accountLifecycleView(value) {
+  const lifecycle = normalizeAccountLifecycle(value);
+  const tone = lifecycle === 'active' ? 'good' : lifecycle === 'completed' ? 'warn' : 'danger';
+  return {value: lifecycle, label: ACCOUNT_LIFECYCLE_LABELS[lifecycle], tone};
+}
+
 function accountExpiryView(exp) {
   const timestamp = Number(exp || 0) * 1000;
   if (!timestamp) return ['有效期未知', 'neutral'];
@@ -147,6 +164,12 @@ function accountMethods(value) {
 function normalizeAccountProtocol(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return ['oaics', 'cs', 'unknown'].includes(normalized) ? normalized : 'unknown';
+}
+
+function normalizeAccountProtocolCheckedAt(value, fallback = Date.now()) {
+  const parsed = Number(value);
+  const timestamp = Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  return timestamp < 100000000000 ? timestamp * 1000 : timestamp;
 }
 
 function accountProtocols(value) {
@@ -237,6 +260,7 @@ function localAccountList() {
     promoReason: String(item.promoReason || '').slice(0, 240),
     paymentMethods: accountMethods(item.paymentMethods),
     checkoutProtocols: accountProtocols(item.checkoutProtocols),
+    lifecycle: normalizeAccountLifecycle(item.lifecycle),
     riskStatus: ['clear', 'rejected', 'cooldown', 'blocked', 'frozen', 'unknown'].includes(item.riskStatus) ? item.riskStatus : 'unknown',
     riskReason: String(item.riskReason || '').slice(0, 240),
     cooldownUntil: Number(item.cooldownUntil || 0),
@@ -263,13 +287,16 @@ function accountMatchesFilters(item) {
   const promo = String($('accountPromoFilter')?.value || '');
   const risk = String($('accountRiskFilter')?.value || '');
   const method = String($('accountMethodFilter')?.value || '').toLowerCase();
-  const haystack = [item.label, item.email, item.accountId, item.source, item.lastError, item.riskReason, item.promoReason]
+  const lifecycle = String($('accountLifecycleFilter')?.value || '').toLowerCase();
+  const lifecycleView = accountLifecycleView(item.lifecycle);
+  const haystack = [item.label, item.email, item.accountId, item.source, item.lastError, item.riskReason, item.promoReason, lifecycleView.label]
     .map(value => String(value || '').toLowerCase()).join(' ');
   if (query && !haystack.includes(query)) return false;
   if (protocol && accountProtocolView(item).protocol !== protocol) return false;
   if (promo && item.promoStatus !== promo) return false;
   if (risk && item.riskStatus !== risk) return false;
   if (method && item.paymentMethods?.[method] !== 'supported') return false;
+  if (lifecycle && item.lifecycle !== lifecycle) return false;
   return true;
 }
 
@@ -277,6 +304,31 @@ function compareAccountsByAddedAt(left, right) {
   const addedAtDifference = accountTimestamp(right.addedAt) - accountTimestamp(left.addedAt);
   if (addedAtDifference) return addedAtDifference;
   return String(right.id || '').localeCompare(String(left.id || ''));
+}
+
+function makeAccountLifecycleCell(item) {
+  const cell = document.createElement('td');
+  cell.className = 'account-lifecycle-cell';
+  const view = accountLifecycleView(item.lifecycle);
+  cell.append(makeStatusPill(view.label, view.tone));
+  const select = document.createElement('select');
+  select.className = 'account-lifecycle-select';
+  select.setAttribute('aria-label', `编辑 ${item.label || item.email || item.accountId} 生命周期`);
+  ACCOUNT_LIFECYCLES.forEach(value => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = ACCOUNT_LIFECYCLE_LABELS[value];
+    option.selected = value === view.value;
+    select.append(option);
+  });
+  select.title = view.value === 'active' ? '主面板会展示此账号' : '主面板会隐藏此账号，管理中心仍保留记录';
+  select.addEventListener('click', event => event.stopPropagation());
+  select.addEventListener('change', () => setManageAccountLifecycle(item.id, select.value));
+  const note = document.createElement('div');
+  note.className = 'account-status-note';
+  note.textContent = view.value === 'active' ? '主面板展示' : '主面板隐藏';
+  cell.append(select, note);
+  return cell;
 }
 
 function renderAccounts(items, pagination = {}) {
@@ -321,6 +373,7 @@ function renderAccounts(items, pagination = {}) {
       identity.append(emailValue);
     }
 
+    const lifecycleCell = makeAccountLifecycleCell(item);
     const protocol = accountProtocolView(item);
     const protocolCell = document.createElement('td');
     protocolCell.append(makeStatusPill(protocol.label, protocol.tone));
@@ -408,20 +461,28 @@ function renderAccounts(items, pagination = {}) {
     const emailButton = makeButton(revealedManageEmailIds.has(item.id) ? '隐藏邮箱' : '查看邮箱', 'toggle-email');
     emailButton.disabled = !email;
     emailButton.title = email ? '仅在当前管理页面展开完整邮箱' : '当前账号没有可展示的邮箱';
+    const useButton = makeButton('使用', 'use-account');
+    useButton.disabled = item.lifecycle !== 'active';
+    useButton.title = item.lifecycle === 'active' ? '设为工作台当前账号' : '请先将生命周期改为正常';
+    const detectButton = makeButton('检测', 'detect-account');
+    detectButton.disabled = !manageAccountCanBatch(item) || state.detectionRunning;
+    detectButton.title = item.lifecycle === 'active' ? '检测 PayPal DE/EUR 协议' : '已归档账号不参与检测';
     const actions = makeActions(
       emailButton,
-      makeButton('使用', 'use-account'),
-      makeButton('检测', 'detect-account'),
+      useButton,
+      detectButton,
       makeButton('移除', 'remove-account', true)
     );
-    row.append(selectCell, identity, protocolCell, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell, actions);
+    row.append(selectCell, identity, lifecycleCell, protocolCell, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell, actions);
     table.append(row);
   });
   setTableState('accountTable', 'accountEmpty', items.length, state.accounts.length ? '当前筛选条件下没有匹配的账号。' : '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');
   const riskCount = state.accounts.filter(item => ['rejected', 'cooldown', 'blocked', 'frozen'].includes(item.riskStatus)).length;
+  const activeCount = state.accounts.filter(item => normalizeAccountLifecycle(item.lifecycle) === 'active').length;
+  const archivedCount = state.accounts.length - activeCount;
   const total = Number(pagination.total ?? items.length);
   const accountCount = total === state.accounts.length ? `${total} 个账号` : `${total} / ${state.accounts.length} 个账号`;
-  if ($('accountListMeta')) $('accountListMeta').textContent = `${accountCount} · 已选 ${manageSelectedAccounts().length} · ${riskCount} 个需要关注`;
+  if ($('accountListMeta')) $('accountListMeta').textContent = `${accountCount} · 正常 ${activeCount} · 已归档 ${archivedCount} · 已选 ${manageSelectedAccounts().length} · ${riskCount} 个需要关注`;
   if ($('statAccounts')) $('statAccounts').textContent = text(state.accounts.length, '0');
   if ($('statAccountRisk')) $('statAccountRisk').textContent = riskCount ? `${riskCount} 个需要关注` : '暂无拒绝 / 冷却信号';
 }
@@ -461,6 +522,7 @@ function renderAccountPagination(total, page, totalPages, start, pageLength) {
 function manageAccountCanBatch(item, now = Date.now()) {
   return Boolean(
     item?.raw
+    && normalizeAccountLifecycle(item.lifecycle) === 'active'
     && (!item.exp || Number(item.exp) * 1000 > now)
     && !['cooldown', 'frozen'].includes(String(item.riskStatus || ''))
   );
@@ -533,6 +595,7 @@ function parseManageAccountRaw(raw, source = '手动粘贴') {
     promoReason: '',
     paymentMethods: {},
     checkoutProtocols: {},
+    lifecycle: 'active',
     riskStatus: 'unknown',
     riskReason: '',
     cooldownUntil: 0,
@@ -608,6 +671,7 @@ function persistManageAccounts() {
       promoReason: String(item.promoReason || '').slice(0, 240),
       paymentMethods: accountMethods(item.paymentMethods),
       checkoutProtocols: accountProtocols(item.checkoutProtocols),
+      lifecycle: normalizeAccountLifecycle(item.lifecycle),
       riskStatus: item.riskStatus || 'unknown',
       riskReason: String(item.riskReason || '').slice(0, 240),
       lastError: String(item.lastError || '').slice(0, 240),
@@ -635,8 +699,8 @@ function refreshManageAccountState() {
   state.accounts = localAccountList();
   state.accountPage = 1;
   state.activeAccountId = String(payload.activeId || '');
-  if (!state.accounts.some(item => item.id === state.activeAccountId)) {
-    state.activeAccountId = state.accounts[0]?.id || '';
+  if (!state.accounts.some(item => item.id === state.activeAccountId && normalizeAccountLifecycle(item.lifecycle) === 'active')) {
+    state.activeAccountId = state.accounts.find(item => normalizeAccountLifecycle(item.lifecycle) === 'active')?.id || '';
   }
   const storedSelectedIds = Array.isArray(payload.selectedIds) ? payload.selectedIds.map(id => String(id)) : [];
   const availableIds = new Set(state.accounts.filter(manageAccountCanBatch).map(item => item.id));
@@ -694,9 +758,36 @@ async function importManageAccountFiles(fileList) {
   importManageAccountItems(items);
 }
 
+function setManageAccountLifecycle(id, value) {
+  const item = state.accounts.find(account => account.id === id);
+  if (!item) return;
+  const lifecycle = normalizeAccountLifecycle(value);
+  if (item.lifecycle === lifecycle) return;
+  item.lifecycle = lifecycle;
+  item.updatedAt = Date.now();
+  if (lifecycle === 'active') {
+    if (!state.activeAccountId) state.activeAccountId = id;
+  } else {
+    state.selectedAccountIds.delete(id);
+    if (state.activeAccountId === id) {
+      state.activeAccountId = state.accounts.find(account => account.id !== id && account.lifecycle === 'active')?.id || '';
+    }
+  }
+  persistManageAccounts();
+  refreshManageAccountState();
+  const message = lifecycle === 'active'
+    ? `${maskLocalAccount(item.label)} 已恢复为正常，主面板会重新展示`
+    : `${maskLocalAccount(item.label)} 已标记为${ACCOUNT_LIFECYCLE_LABELS[lifecycle]}，主面板将隐藏`;
+  setMessage($('manageAccountStatus'), message);
+}
+
 function useManageAccount(id) {
   const item = state.accounts.find(account => account.id === id);
   if (!item) return;
+  if (normalizeAccountLifecycle(item.lifecycle) !== 'active') {
+    setMessage($('manageAccountStatus'), '已完成或已注销/删除账号不能设为工作台当前账号，请先恢复为正常。', true);
+    return;
+  }
   state.activeAccountId = id;
   persistManageAccounts();
   renderFilteredAccounts();
@@ -1098,21 +1189,32 @@ function manageRecordDetectionOutcome(job, data) {
     const country = String(result.checkout_protocol_country || result.checkout_country || 'DE').trim().toUpperCase().slice(0, 8);
     const currency = String(result.checkout_protocol_currency || result.checkout_currency || 'EUR').trim().toUpperCase().slice(0, 8);
     item.checkoutProtocols = accountProtocols(item.checkoutProtocols);
-    item.checkoutProtocols[`paypal:${country}:${currency}`] = {
-      protocol,
-      country,
-      currency,
-      checkedAt: Number(result.checkout_protocol_checked_at || now),
-      baseline: Boolean(result.checkout_protocol_baseline),
-      source: String(result.checkout_protocol_source || 'manage').slice(0, 40),
-      paymentMethods: accountMethods(result.oaics_payment_method_types || result.payment_method_types || [])
-    };
+    const key = `paypal:${country}:${currency}`;
+    const checkedAt = normalizeAccountProtocolCheckedAt(result.checkout_protocol_checked_at, now);
+    const previous = item.checkoutProtocols[key];
+    const previousIsKnown = previous && ['oaics', 'cs'].includes(previous.protocol);
+    const preservePrevious = previousIsKnown && (
+      protocol === 'unknown'
+      || Number(previous.checkedAt || 0) > checkedAt
+    );
+    if (!preservePrevious) {
+      item.checkoutProtocols[key] = {
+        protocol,
+        country,
+        currency,
+        checkedAt,
+        baseline: Boolean(result.checkout_protocol_baseline),
+        source: String(result.checkout_protocol_source || 'manage').slice(0, 40),
+        paymentMethods: accountMethods(result.oaics_payment_method_types || result.payment_method_types || [])
+      };
+    }
     item.paymentMethods = accountMethods(item.paymentMethods);
     if (protocol === 'oaics' && result.oaics_paypal_available === true) item.paymentMethods.paypal = 'supported';
     item.riskStatus = item.riskStatus === 'frozen' ? 'frozen' : 'clear';
     item.riskReason = item.riskStatus === 'frozen' ? item.riskReason : '最近一次协议检测完成，未发现拒绝信号';
     item.lastError = '';
-    job.text = `协议 ${protocol.toUpperCase()} · ${country}/${currency}`;
+    const effectiveProtocol = preservePrevious ? previous.protocol : protocol;
+    job.text = `协议 ${effectiveProtocol.toUpperCase()} · ${country}/${currency}`;
   } else {
     const error = String(data?.error || job.error || '协议检测失败');
     item.riskStatus = /account_(?:blocked|banned|suspended|restricted)|账号.*(?:封禁|冻结|拒绝)/i.test(error) ? 'blocked' : item.riskStatus;
@@ -1814,7 +1916,7 @@ function bindEvents() {
   $('addressCountryFilter').addEventListener('change', loadAddresses);
   $('addressTypeFilter').addEventListener('change', loadAddresses);
   $('refreshAccounts').addEventListener('click', loadAccounts);
-  ['accountQuery', 'accountProtocolFilter', 'accountPromoFilter', 'accountRiskFilter', 'accountMethodFilter'].forEach((id) => {
+  ['accountQuery', 'accountLifecycleFilter', 'accountProtocolFilter', 'accountPromoFilter', 'accountRiskFilter', 'accountMethodFilter'].forEach((id) => {
     const resetAccountPage = () => {
       state.accountPage = 1;
       renderFilteredAccounts();

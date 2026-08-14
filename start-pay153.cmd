@@ -16,9 +16,27 @@ call :stop_existing
 if errorlevel 1 exit /b 1
 if /I "%ACTION%"=="stop" exit /b 0
 
+set "PYTHON_CMD="
 where python.exe >nul 2>&1
-if errorlevel 1 (
-  echo Python was not found on PATH.
+if not errorlevel 1 (
+  python.exe -c "import flask, curl_cffi, cryptography" >nul 2>&1
+  if not errorlevel 1 set "PYTHON_CMD=python.exe"
+)
+
+if not defined PYTHON_CMD (
+  where py.exe >nul 2>&1
+  if not errorlevel 1 (
+    py.exe -3.11 -c "import flask, curl_cffi, cryptography" >nul 2>&1
+    if not errorlevel 1 set "PYTHON_CMD=py.exe -3.11"
+  )
+)
+
+if not defined PYTHON_CMD (
+  echo Python was found, but PAY.153 dependencies are missing.
+  echo Install them with:
+  echo   python -m pip install -r requirements.txt
+  echo Or, when using Python 3.11:
+  echo   py -3.11 -m pip install -r requirements.txt
   exit /b 1
 )
 
@@ -37,7 +55,7 @@ if not exist "node_modules\jsdom\package.json" (
 )
 
 echo Starting PAY.153 Checkout Link on 127.0.0.1:%PORT% ...
-python.exe app.py
+%PYTHON_CMD% app.py
 exit /b %ERRORLEVEL%
 
 :stop_existing

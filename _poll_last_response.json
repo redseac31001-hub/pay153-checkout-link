@@ -1,5 +1,5 @@
 {
-  "id": "ppage_1U3zceKslHRdbaPgP4FHnFJr",
+  "id": "ppage_1U4HRoKslHRdbaPgWTxhlfLe",
   "object": "checkout.session",
   "account_settings": {
     "account_id": "acct_1Pj377KslHRdbaPg",
@@ -73,7 +73,7 @@
   },
   "checkout_multistep_ui": false,
   "client_reference_id": null,
-  "config_id": "1911bed8-195e-411f-8828-25e793e7b858",
+  "config_id": "3deefe01-2971-49fd-9908-f02028ba3fa6",
   "consent": null,
   "consent_collection": {
     "payment_method_reuse_agreement": null,
@@ -92,7 +92,7 @@
     "terms_of_service_acceptance": null
   },
   "customer": {
-    "id": "cus_V3zUlnuNxcYRTy",
+    "id": "cus_V48gZ6RSRVPZtP",
     "object": "customer",
     "address": {
       "city": "Berlin",
@@ -105,7 +105,7 @@
     "business_name": null,
     "card_art": null,
     "customer_provided": true,
-    "email": "verve-retrial7+pro@icloud.com",
+    "email": "jaunty.merino.5h+kpao@icloud.com",
     "has_fallback_payment_method": false,
     "individual_name": null,
     "name": "Alex Meyer",
@@ -113,7 +113,7 @@
     "phone": null,
     "tax_ids": []
   },
-  "customer_email": "verve-retrial7+pro@icloud.com",
+  "customer_email": "jaunty.merino.5h+kpao@icloud.com",
   "customer_managed_saved_payment_methods_offer_save": {
     "enabled": true,
     "status": "not_accepted"
@@ -123,23 +123,23 @@
   "does_not_collect_postal_code_for_non_us_card_transactions": false,
   "eid": "NA",
   "elements_options": {
-    "__checkout_session_id": "cs_live_a1UxJecB1L4PdredEQBStH9kg4NFt3d2yxHGEZWb3CuJA2ZXr0oW7ooIEo",
+    "__checkout_session_id": "cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG",
     "__custom_checkout_customer_name": "Alex Meyer",
     "__payment_pages_experiments": [
       {
-        "event_id": "bfd92557-5d18-459e-85ed-441e104eb38f",
+        "event_id": "0cde03bf-9181-4af6-8edb-b1ccddf8bafd",
         "exposure_event_name": "experiment_exposure",
         "name": "guacamole_resend_otp",
         "variant": "control"
       },
       {
-        "event_id": "10a2b91e-0673-4eee-b5ed-b54710ee4b2d",
+        "event_id": "a8e0e3cc-2b8e-4451-bd8c-dc05aab19210",
         "exposure_event_name": "",
         "name": "link_global_holdback_ewcs_aa",
         "variant": "control"
       },
       {
-        "event_id": "deb5ceeb-7884-406a-a59b-f7693ccc8581",
+        "event_id": "fccb6a01-0d71-46da-ac1b-bd581ffe9542",
         "exposure_event_name": "",
         "name": "link_global_holdback_ewcs",
         "variant": "control"
@@ -190,29 +190,29 @@
       "enabled": false
     }
   ],
-  "enforcement_mode": "open",
+  "enforcement_mode": "restricted",
   "experiment_data": [
     {
-      "event_id": "bfd92557-5d18-459e-85ed-441e104eb38f",
+      "event_id": "0cde03bf-9181-4af6-8edb-b1ccddf8bafd",
       "exposure_event_name": "experiment_exposure",
       "name": "guacamole_resend_otp",
       "variant": "control"
     },
     {
-      "event_id": "10a2b91e-0673-4eee-b5ed-b54710ee4b2d",
+      "event_id": "a8e0e3cc-2b8e-4451-bd8c-dc05aab19210",
       "exposure_event_name": "",
       "name": "link_global_holdback_ewcs_aa",
       "variant": "control"
     },
     {
-      "event_id": "deb5ceeb-7884-406a-a59b-f7693ccc8581",
+      "event_id": "fccb6a01-0d71-46da-ac1b-bd581ffe9542",
       "exposure_event_name": "",
       "name": "link_global_holdback_ewcs",
       "variant": "control"
     }
   ],
   "experiments_data": {
-    "event_id": "c31aa9f3-40f5-4671-9b99-e783792e824d",
+    "event_id": "ae6dee4e-1ff8-4076-aa3b-3091a46c4bd2",
     "experiment_assignments": {
       "checkout_bancontact_name_optional_one_time": "control",
       "checkout_eps_name_optional": "control",
@@ -224,6 +224,7 @@
       "cpl_unified_order_summary_experiment": "control",
       "emea_wallets_ideal_wero_rebranding": "control",
       "ff_checkout_cpl_lid_promo_badge_color_opt": "control",
+      "ff_checkout_custom_flag_server_updates_on_canconfirm": "control",
       "ff_checkout_optimized_image_eff": "control",
       "ff_checkout_test_frontend_eff": "control",
       "link_ab_test": "control",
@@ -255,6 +256,7 @@
     }
   },
   "feature_flags": {
+    "checkout_address_autocomplete_enabled": true,
     "checkout_allow_subcent_in_payment_mode": true,
     "checkout_apple_pay_old_devices_tax_address_collection": true,
     "checkout_custom_google_pay_for_automatic_tax": true,
@@ -282,12 +284,12 @@
     "sandboxes_rebrand_testmode": true
   },
   "geocoding": {
-    "country_code": "TH",
+    "country_code": "BR",
     "region_name": null
   },
   "has_async_attached_payment_method": false,
   "has_dynamic_tax_rates": false,
-  "init_checksum": "XJgp8kny4AxZhcwrvw8wgK4hzFz3wqkw",
+  "init_checksum": "1WPJmQwTQM38Edb5DhaPWC1LF5ULexS5",
   "integration_identifier": null,
   "invoice": {
     "object": "invoice",
@@ -339,7 +341,7 @@
             }
           ],
           "images": null,
-          "line_item_id": "li_1U3zcwKslHRdbaPgA5KPs0bF",
+          "line_item_id": "li_1U4HRzKslHRdbaPg0uXYwk0O",
           "price": {
             "id": "price_1QrN9EKslHRdbaPgpE8MUv03",
             "object": "price",
@@ -472,7 +474,7 @@
   "link_settings": {
     "consumer_found": false,
     "enable_partner_lookup": false,
-    "hcaptcha_rqdata": "5onuAOP153aQJ9bkbIZZWNrCgrGoZ2ixZ4a01S2HXyISPD4y12uNx/dcE0MQ1yc0YGUwwBbknHh4Uu7icssk+kSG0e4ZnACxJi4xeoyLNfkpqf3HKRJGlWYIh/Atoxsxr7VZAyT6SDCfUOD5KIaz/BRHkzucC3/Q9K1Z539kAtw3EMCpZv6Ot6Trgz4D+OzRjTOuQVgH5utNZHw9mNhKB4yMH83iAC+BjqwA1WL17XeCAC9GPOEeK7m+MfX3qS9Wfww3cx9H62Mkk3kPqJ9quw==GmVoHi8KDjQX5dj+",
+    "hcaptcha_rqdata": "SX/Irg3yByJ87bcwwQZzV3YtziLFGbCveR5C0k+70QcwjsYrlaUYqomZbZAh0tvn9PPB0NYE4BgblWEoIP2AqAMtKD4cC/iQXX7v/UL5Y2SIZ+QA4xaskYNlWEdQ69GTZGaCw5uWbqg9NjCmKzvJs5fSwcBWghVoN/mVzYjZqbEh3GgA7h/+0LA0VDd8S5oA8nX2OBsPhuYBfVqjdDAWY5icNz/YPqJWcaHgi44kzKviqNc1uaPCwNo3rIWoXWusaaC+dUhr1DS3uTS6r4a3Og==5VDZilxXRow//q3p",
     "hcaptcha_site_key": "24ed0064-62cf-4d42-9960-5dd1a41d4e29",
     "link_brand": "link",
     "link_consumer_incentive": null,
@@ -508,9 +510,9 @@
   "on_behalf_of": null,
   "ordered_payment_method_types": [
     "card",
-    "paypal",
     "apple_pay",
-    "google_pay"
+    "google_pay",
+    "paypal"
   ],
   "origin_context": null,
   "payment_collection_context": null,
@@ -632,21 +634,21 @@
     ]
   },
   "redirect_on_completion": null,
-  "return_url": "https://chatgpt.com/checkout/verify?stripe_session_id=cs_live_a1UxJecB1L4PdredEQBStH9kg4NFt3d2yxHGEZWb3CuJA2ZXr0oW7ooIEo&processor_entity=openai_ie&plan_type=plus",
+  "return_url": "https://chatgpt.com/checkout/verify?stripe_session_id=cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG&processor_entity=openai_ie&plan_type=plus",
   "route_to_orchestration_interface": false,
-  "rqdata": "aHnjQwuTzETpBwjyHW9ZplcxFZ02r5CUoBW0wheKIv0sigcZw19UOlLZzZdojYcAoOvKTWwqZXumov7n6BVOu3p9/B2J2KxJOYDOp0eitCs2bC1Vcou4OMpB/PyzT8WY2NdpN/xjUxiRpb2vF6nfugDtOeUGDTZCCOzPHtDcsz/fKP+8bgjCVG8mqHiB1uc/6y50kMqnX5UVo1EbVUwgmHRCAr+cT6/Dtf5GxQ30LWuh1swW7UfGDZEOBXWbRBFXbC32GkWX5z7X1T0TtnjzmA==zXvX5PxBe58nNCq7",
+  "rqdata": "XiZzpMilbb5wbwlgpHZ7MZy1PpgS8ar80ljdHcMvvEG6xjVKDyzyo7FaE9mGaNrNKgGb9BHBKjB6eROHEMz96ip39jIrLrww0pS953c7uTeca0tbOrvB4pP3YzyocgKX90OjSSqHhOL+X1sM043liwpz+6+VlXm9aND5JVXK/Dk1N35sNm41cWPS+jR1KQhs5wIkUpshi4Ef5WwraIYCe1c5G2JLoDAHHCHx+64ONBjUoDhsFOzOoklrxGvRNKiwhbpNvpMYAsWzUlN/ohpRrw==7RfssWj1BBjh3ks3",
   "sepa_debit_info": null,
-  "session_id": "cs_live_a1UxJecB1L4PdredEQBStH9kg4NFt3d2yxHGEZWb3CuJA2ZXr0oW7ooIEo",
+  "session_id": "cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG",
   "setup_future_usage": null,
   "setup_future_usage_for_payment_method_type": {},
   "setup_intent": {
-    "id": "seti_1U3zd8KslHRdbaPgrGflPCtz",
+    "id": "seti_1U4HSBKslHRdbaPgFMM9SMID",
     "object": "setup_intent",
     "allowed_payment_method_types": null,
     "automatic_payment_methods": null,
     "cancellation_reason": null,
-    "client_secret": "seti_1U3zd8KslHRdbaPgrGflPCtz_secret_V47sDMIt1NKZLgJ6lNOOwB6eHRg5c1z",
-    "created": 1786631354,
+    "client_secret": "seti_1U4HSBKslHRdbaPgFMM9SMID_secret_V4QIdWTCy9oDz29f3DHHflCKlmcFMsu",
+    "created": 1786699867,
     "description": null,
     "excluded_payment_method_types": null,
     "last_setup_error": {
@@ -655,7 +657,7 @@
       "doc_url": "https://stripe.com/docs/error-codes/setup-attempt-failed",
       "message": "The latest attempt to set up the payment method has failed.",
       "payment_method": {
-        "id": "pm_1U3zd3KslHRdbaPgVyJj5ezc",
+        "id": "pm_1U4HS7KslHRdbaPgcw2odzp5",
         "object": "payment_method",
         "allow_redisplay": "limited",
         "billing_details": {
@@ -667,12 +669,12 @@
             "postal_code": "10785",
             "state": "BE"
           },
-          "email": "checkout-1b5f3b5ff2@outlook.com",
+          "email": "checkout-513e91a2a4@outlook.com",
           "name": "Alex Meyer",
           "phone": null,
           "tax_id": null
         },
-        "created": 1786631349,
+        "created": 1786699863,
         "customer": null,
         "customer_account": null,
         "livemode": true,
@@ -705,9 +707,9 @@
   "state": "active",
   "statement_descriptor": "OPENAI *CHATGPT SUBSCR",
   "status": "open",
-  "stripe_hosted_url": "https://checkout.stripe.com/c/pay/cs_live_a1UxJecB1L4PdredEQBStH9kg4NFt3d2yxHGEZWb3CuJA2ZXr0oW7ooIEo#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPydhYCcpJ3ZwZ3Zmd2x1cWxqa1BrbHRwYGtgdnZAa2RnaWBhJz9jZGl2YCknZHVsTmB8Jz8ndW5aaWxzYFowNFVvNjIyTnZpTVdhZ2RVYlFPXG9RbX9NNmMwYXE0SzRzTjJJUHU1dG01fEtWZHdtY18za2NnQjJDQ2ltPU5JfVNuc2FIUkswajNIZjFTYWQzS01kVmtkUzU1RjdWZ2k9X3YnKSdjd2poVmB3c2B3Jz9xd3BgKSdnZGZuYndqcGthRmppancnPycmY2NjY2NjJyknaWR8anBxUXx1YCc%2FJ3Zsa2JpYFpscWBoJyknYGtkZ2lgVWlkZmBtamlhYHd2Jz9xd3BgeCUl",
+  "stripe_hosted_url": "https://checkout.stripe.com/c/pay/cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPydhYCcpJ3ZwZ3Zmd2x1cWxqa1BrbHRwYGtgdnZAa2RnaWBhJz9jZGl2YCknZHVsTmB8Jz8ndW5aaWxzYFowNFVvNjIyTnZpTVdhZ2RVYlFPXG9RbX9NNmMwYXE0SzRzTjJJUHU1dG01fEtWZHdtY18za2NnQjJDQ2ltPU5JfVNuc2FIUkswajNIZjFTYWQzS01kVmtkUzU1RjdWZ2k9X3YnKSdjd2poVmB3c2B3Jz9xd3BgKSdnZGZuYndqcGthRmppancnPycmY2NjY2NjJyknaWR8anBxUXx1YCc%2FJ3Zsa2JpYFpscWBoJyknYGtkZ2lgVWlkZmBtamlhYHd2Jz9xd3BgeCUl",
   "submission_attempt": {
-    "id": "cs_attempt_1U3zd4KslHRdbaPgB3ISiKTH",
+    "id": "cs_attempt_1U4HS8KslHRdbaPgYS1OTuXZ",
     "error": {
       "code": "checkout_approval_payment_failure_with_payment_error",
       "decline_code": null,

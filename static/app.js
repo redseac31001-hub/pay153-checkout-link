@@ -48,6 +48,12 @@ const ACCOUNT_PAYMENT_METHOD_ALIASES = {
 };
 const CHECKOUT_PROTOCOL_TTL_MS = 24 * 60 * 60 * 1000;
 const CHECKOUT_PROTOCOLS = new Set(['oaics', 'cs', 'unknown']);
+const ACCOUNT_LIFECYCLES = new Set(['active', 'completed', 'deleted']);
+const ACCOUNT_LIFECYCLE_LABELS = {
+  active: '正常',
+  completed: '已完成',
+  deleted: '已注销/删除'
+};
 const accountEntries = [];
 let activeAccountId = '';
 let accountIdSeq = 0;
@@ -1202,6 +1208,7 @@ function parseAccountRaw(raw, sourceLabel=''){
     promoReason: '',
     paymentMethods: {},
     checkoutProtocols: {},
+    lifecycle: 'active',
     riskStatus: 'unknown',
     riskReason: '',
     lastError: '',
@@ -1261,6 +1268,15 @@ function normalizeCheckoutProtocol(value){
   return CHECKOUT_PROTOCOLS.has(normalized) ? normalized : 'unknown';
 }
 
+function normalizeAccountLifecycle(value){
+  const normalized = String(value || '').trim().toLowerCase();
+  return ACCOUNT_LIFECYCLES.has(normalized) ? normalized : 'active';
+}
+
+function isAccountArchived(entry){
+  return normalizeAccountLifecycle(entry?.lifecycle) !== 'active';
+}
+
 function checkoutProtocolKey(country, currency, method='paypal'){
   const rail = normalizeAccountPaymentMethod(method) || 'paypal';
   const normalizedCountry = String(country || '').trim().toUpperCase();
@@ -1304,6 +1320,7 @@ function freshCheckoutProtocolRecord(entry, country, currency, method='paypal', 
 }
 
 function restoreAccountStatus(target, source){
+  target.lifecycle = normalizeAccountLifecycle(source?.lifecycle || target.lifecycle);
   target.cooldownUntil = Number(source?.cooldownUntil || target.cooldownUntil || 0);
   target.lastDeclineAt = Number(source?.lastDeclineAt || target.lastDeclineAt || 0);
   target.consecutiveDeclines = Number(source?.consecutiveDeclines || target.consecutiveDeclines || 0);
@@ -1381,6 +1398,7 @@ function persistAccounts(){
       promoReason: String(entry.promoReason || '').slice(0, 240),
       paymentMethods: normalizeAccountPaymentMethods(entry.paymentMethods),
       checkoutProtocols: normalizeAccountCheckoutProtocols(entry.checkoutProtocols),
+      lifecycle: normalizeAccountLifecycle(entry.lifecycle),
       riskStatus: entry.riskStatus || 'unknown',
       riskReason: String(entry.riskReason || '').slice(0, 240),
       lastError: String(entry.lastError || '').slice(0, 240),
@@ -1427,8 +1445,8 @@ function loadAccountsFromStorage(){
       accountEntries.push(entry);
     });
     const wanted = String(parsed?.activeId || '');
-    if (wanted && accountEntries.some(item => item.id === wanted)) activeAccountId = wanted;
-    else if (accountEntries.length) activeAccountId = accountEntries[0].id;
+    if (wanted && accountEntries.some(item => item.id === wanted && !isAccountArchived(item))) activeAccountId = wanted;
+    else activeAccountId = accountEntries.find(item => !isAccountArchived(item))?.id || '';
     const storedSelectedIds = Array.isArray(parsed?.selectedIds) ? parsed.selectedIds.map(id => String(id)) : [];
     const availableIds = new Set(accountEntries.filter(entry => accountCanBatch(entry)).map(entry => entry.id));
     storedSelectedIds.forEach(id => {
@@ -1449,7 +1467,7 @@ function setAccountImportStatus(message, tone=''){
 }
 
 function accountCanBatch(entry, now=Date.now()){
-  return Boolean(entry && !entry.expired && !isAccountInCooldown(entry, now) && !isAccountFrozen(entry));
+  return Boolean(entry && !isAccountArchived(entry) && !entry.expired && !isAccountInCooldown(entry, now) && !isAccountFrozen(entry));
 }
 
 function getBatchSelectedAccounts(){
@@ -1583,6 +1601,7 @@ function accountChipBadge(label, tone='neutral'){
 
 function selectionAccountEntries(now=Date.now()){
   return accountEntries
+    .filter(entry => !isAccountArchived(entry))
     .map((entry, index) => ({entry, index}))
     .sort((left, right) => {
       const markedOrder = Number(accountHasMarker(left.entry, now)) - Number(accountHasMarker(right.entry, now));
@@ -1634,15 +1653,28 @@ function renderAccountList(){
     updateBatchControls();
     return;
   }
-  list.hidden = false;
   const now = Date.now();
+  const visibleEntries = selectionAccountEntries(now);
+  const archivedCount = accountEntries.filter(isAccountArchived).length;
+  const archivedLabel = `${ACCOUNT_LIFECYCLE_LABELS.completed}/${ACCOUNT_LIFECYCLE_LABELS.deleted}`;
+  if (!visibleEntries.length) {
+    list.hidden = true;
+    if ($('accountListHint')) {
+      $('accountListHint').hidden = false;
+      $('accountListHint').textContent = `已隐藏 ${archivedCount} 个${archivedLabel}账号；可前往管理中心查询并恢复状态`;
+    }
+    if ($('tokenHint')) $('tokenHint').textContent = `当前没有正常账号 · 管理中心仍保留 ${archivedCount} 个账号记录`;
+    updateBatchControls();
+    return;
+  }
+  list.hidden = false;
   const groupDefinitions = [
     {key: 'oaics', label: 'OAICS', description: 'OpenAI Checkout', tone: 'oaics'},
     {key: 'cs', label: 'CS', description: 'Stripe Checkout', tone: 'cs'},
     {key: 'unknown', label: '待检测', description: '尚未识别协议', tone: 'unknown'}
   ];
   const groupedEntries = Object.fromEntries(groupDefinitions.map(group => [group.key, []]));
-  selectionAccountEntries(now).forEach(entry => {
+  visibleEntries.forEach(entry => {
     const protocolView = accountProtocolView(entry, now);
     const groupKey = protocolView?.protocol === 'oaics' || protocolView?.protocol === 'cs'
       ? protocolView.protocol
@@ -1796,24 +1828,25 @@ function renderAccountList(){
     list.appendChild(section);
   });
   if ($('accountListHint')) {
-    const markedCount = accountEntries.filter(entry => accountHasMarker(entry, now)).length;
+    const markedCount = visibleEntries.filter(entry => accountHasMarker(entry, now)).length;
     const groupSummary = groupDefinitions
       .filter(group => groupedEntries[group.key].length)
       .map(group => `${group.label} ${groupedEntries[group.key].length}`)
       .join(' · ');
+    const archivedSummary = archivedCount ? ` · 已隐藏 ${archivedCount} 个${archivedLabel}账号` : '';
     $('accountListHint').hidden = false;
     $('accountListHint').textContent = markedCount
-      ? `${groupSummary} · ${accountEntries.length - markedCount} 个账号优先显示 · ${markedCount} 个已标记账号已排到后方`
-      : `${groupSummary} · 点击账号行即可选用`;
+      ? `${groupSummary} · ${visibleEntries.length - markedCount} 个账号优先显示 · ${markedCount} 个已标记账号已排到后方${archivedSummary}`
+      : `${groupSummary} · 点击账号行即可选用${archivedSummary}`;
   }
   if ($('tokenHint')) {
     const active = accountEntries.find(item => item.id === activeAccountId);
     if (active && isAccountInCooldown(active)) {
       $('tokenHint').textContent = `冷却中 ${active.label} · 剩余 ${formatCooldownRemaining(active)}`;
     } else if (active) {
-      $('tokenHint').textContent = `已选 ${active.label} · 共 ${accountEntries.length} 个账号`;
+      $('tokenHint').textContent = `已选 ${active.label} · 当前可用 ${visibleEntries.length} 个账号${archivedCount ? ` · 已隐藏 ${archivedCount} 个` : ''}`;
     } else {
-      $('tokenHint').textContent = `已保存 ${accountEntries.length} 个账号 · 点击选用`;
+      $('tokenHint').textContent = `已保存 ${visibleEntries.length} 个可用账号 · 点击选用${archivedCount ? ` · 已隐藏 ${archivedCount} 个` : ''}`;
     }
   }
   scheduleAccountCooldownTick();
@@ -1822,7 +1855,7 @@ function renderAccountList(){
 
 function selectAccount(id){
   const entry = accountEntries.find(item => item.id === id);
-  if (!entry) return;
+  if (!entry || isAccountArchived(entry)) return;
   activeAccountId = entry.id;
   if ($('token')) $('token').value = entry.raw;
   persistAccounts();
@@ -1851,7 +1884,7 @@ function removeAccount(id){
   const removed = accountEntries.splice(index, 1)[0];
   batchSelectedAccountIds.delete(id);
   if (activeAccountId === id) {
-    activeAccountId = accountEntries[0]?.id || '';
+    activeAccountId = accountEntries.find(item => !isAccountArchived(item))?.id || '';
     if ($('token')) {
       const next = accountEntries.find(item => item.id === activeAccountId);
       $('token').value = next ? next.raw : '';
@@ -2006,13 +2039,25 @@ function recordAccountCheckoutProtocol(target, result){
   const country = String(result.checkout_protocol_country || result.checkout_country || '').trim().toUpperCase();
   const currency = String(result.checkout_protocol_currency || result.checkout_currency || '').trim().toUpperCase();
   if (!country || !currency) return null;
-  const checkedAtRaw = Number(result.checkout_protocol_checked_at || Date.now());
-  const checkedAt = checkedAtRaw < 100000000000 ? checkedAtRaw * 1000 : checkedAtRaw;
+  const checkedAtRaw = Number(result.checkout_protocol_checked_at);
+  const checkedAtValue = Number.isFinite(checkedAtRaw) && checkedAtRaw > 0 ? checkedAtRaw : Date.now();
+  const checkedAt = checkedAtValue < 100000000000 ? checkedAtValue * 1000 : checkedAtValue;
   const key = checkoutProtocolKey(country, currency, method);
   const methods = normalizeAccountPaymentMethods(
     result.oaics_payment_method_types || result.payment_method_types || []
   );
   target.checkoutProtocols = normalizeAccountCheckoutProtocols(target.checkoutProtocols);
+  const previous = target.checkoutProtocols[key];
+  const previousIsKnown = previous && ['oaics', 'cs'].includes(previous.protocol);
+  // An incomplete checkout response must not downgrade a confirmed protocol.
+  // Keep the newer known record as well when an older poll result arrives late.
+  if (
+    previousIsKnown
+    && (
+      protocol === 'unknown'
+      || Number(previous.checkedAt || 0) > checkedAt
+    )
+  ) return previous;
   target.checkoutProtocols[key] = {
     protocol,
     country: country.slice(0, 8),
@@ -2233,6 +2278,11 @@ async function importAccountFiles(fileList){
 
 function initializeAccountManager(){
   loadAccountsFromStorage();
+  window.addEventListener('storage', event => {
+    if (event.key !== ACCOUNT_STORAGE_KEY) return;
+    loadAccountsFromStorage();
+    renderAccountList();
+  });
   const fileInput = $('accountFileInput');
   const clearButton = $('accountClearAll');
   $('accountImportPaste')?.addEventListener('click', importPastedAccounts);
