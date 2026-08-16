@@ -1958,6 +1958,12 @@ class JobStore:
                 exit_proxy, payment_geo, rejected_countries = select_paypal_exit_proxy(
                     exit_proxy,
                     exit_pool,
+                self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
+                entry_geo = proxy_geo_cached(entry_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                exit_proxy, payment_geo, rejected_countries = select_paypal_exit_proxy(
+                    exit_proxy,
+                    exit_pool,
                     scan_limit=int(os.getenv("PAYPAL_PROXY_SCAN_LIMIT", "24") or 24),
                 )
                 payment_country = payment_geo.get("country") or ""
@@ -2021,12 +2027,21 @@ class JobStore:
                     selected_country = str(
                         selected_paypal_profile.get("country") or ""
                     ).strip().upper()
-                    if selected_country != paypal_billing_country:
-                        raise RuntimeError(
-                            f"所选 PayPal 账单地址国家 {selected_country or '未知'} 与本轮实际账单国家 "
-                            f"{paypal_billing_country} 不一致；请匹配最终 Checkout 地区或改回自动随机地址"
-                        )
                     selection = options.get("paypal_billing_selection") or {}
+                    if selected_country != paypal_billing_country:
+                        if selection.get("kind") == "builtin_address":
+                            self.log(
+                                job_id,
+                                f"内置公共地址国家 {selected_country} 与出口推断 "
+                                f"{paypal_billing_country} 不同，以地址国家为准",
+                            )
+                            paypal_billing_country = selected_country
+                            options["paypal_billing_country"] = paypal_billing_country
+                        else:
+                            raise RuntimeError(
+                                f"所选 PayPal 账单地址国家 {selected_country or '未知'} 与本轮实际账单国家 "
+                                f"{paypal_billing_country} 不一致；请匹配最终 Checkout 地区或改回自动随机地址"
+                            )
                     self.log(
                         job_id,
                         f"PayPal 指定账单地址：source={selection.get('kind') or 'manage'} "
