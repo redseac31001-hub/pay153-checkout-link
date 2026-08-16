@@ -16,6 +16,7 @@ const ACCOUNT_LIFECYCLE_LABELS = {
   deleted: '已注销/删除'
 };
 const MANAGE_DETECTION_CONCURRENCY_KEY = 'pay153.manage.detection.concurrency.v1';
+const MANAGE_DETECTION_PROXY_CONFIG_KEY = 'pay153.manage.detection.proxy_config.v1';
 const DEFAULT_MANAGE_DETECTION_CONCURRENCY = 3;
 const DEFAULT_TASK_LIMITS = {perIp: 3, global: 20, workers: 20};
 
@@ -375,44 +376,43 @@ function renderAccounts(items, pagination = {}) {
 
     const lifecycleCell = makeAccountLifecycleCell(item);
     const protocol = accountProtocolView(item);
-    const protocolCell = document.createElement('td');
-    protocolCell.append(makeStatusPill(protocol.label, protocol.tone));
+    const expiry = accountExpiryView(item.exp);
+    const protocolExpiryCell = document.createElement('td');
+    protocolExpiryCell.append(makeStatusPill(protocol.label, protocol.tone));
     const protocolScope = document.createElement('div');
     protocolScope.className = 'account-status-note';
     protocolScope.textContent = protocol.scope === '—' ? 'PayPal DE/EUR' : protocol.scope;
-    protocolCell.append(protocolScope);
-
-    const expiry = accountExpiryView(item.exp);
-    const expiryCell = document.createElement('td');
-    expiryCell.append(makeStatusPill(expiry[0], expiry[1]));
-    if (item.exp) {
-      expiryCell.title = expiry[0];
-    }
+    protocolExpiryCell.append(protocolScope);
+    const expiryPill = makeStatusPill(expiry[0], expiry[1]);
+    expiryPill.classList.add('account-combined-sep');
+    protocolExpiryCell.append(expiryPill);
+    if (item.exp) protocolExpiryCell.title = `有效期 ${expiry[0]}`;
 
     const promo = accountPromoView(item.promoStatus);
-    const promoCell = document.createElement('td');
-    promoCell.append(makeStatusPill(promo[0], promo[1]));
+    const promoMethodsCell = document.createElement('td');
+    promoMethodsCell.append(makeStatusPill(promo[0], promo[1]));
     if (item.promoReason) {
       const note = document.createElement('div');
       note.className = 'account-status-note';
       note.textContent = item.promoReason;
-      promoCell.append(note);
+      promoMethodsCell.append(note);
     }
-
-    const methodsCell = document.createElement('td');
     const methods = Object.entries(item.paymentMethods || {});
+    const methodsList = document.createElement('div');
+    methodsList.className = 'account-method-list';
     if (!methods.length) {
-      methodsCell.append(makeStatusPill('未检测', 'neutral'));
+      const sep = makeStatusPill('未检测', 'neutral');
+      sep.classList.add('account-combined-sep');
+      methodsList.append(sep);
     } else {
-      const methodsList = document.createElement('div');
-      methodsList.className = 'account-method-list';
       methods.forEach(([method, status]) => {
         const view = accountMethodView(status);
         const chip = makeStatusPill(`${ACCOUNT_METHOD_LABELS[method] || method} · ${view[0]}`, view[1]);
+        if (methodsList.children.length) chip.classList.add('account-combined-sep');
         methodsList.append(chip);
       });
-      methodsCell.append(methodsList);
     }
+    promoMethodsCell.append(methodsList);
 
     const risk = accountRiskView(item.riskStatus);
     const riskCell = document.createElement('td');
@@ -473,7 +473,7 @@ function renderAccounts(items, pagination = {}) {
       detectButton,
       makeButton('移除', 'remove-account', true)
     );
-    row.append(selectCell, identity, lifecycleCell, protocolCell, expiryCell, promoCell, methodsCell, riskCell, lastCell, sourceCell, actions);
+    row.append(selectCell, identity, lifecycleCell, protocolExpiryCell, promoMethodsCell, riskCell, lastCell, sourceCell, actions);
     table.append(row);
   });
   setTableState('accountTable', 'accountEmpty', items.length, state.accounts.length ? '当前筛选条件下没有匹配的账号。' : '当前浏览器没有本机账号记录。请先回工作台导入或粘贴账号。');
@@ -530,6 +530,9 @@ function manageAccountCanBatch(item, now = Date.now()) {
 
 function manageSelectedAccounts() {
   return state.accounts.filter(item => state.selectedAccountIds.has(item.id) && manageAccountCanBatch(item));
+}
+function manageFilteredBatchableAccounts() {
+  return state.accounts.filter(item => item.lifecycle !== 'deleted').filter(accountMatchesFilters).filter(manageAccountCanBatch);
 }
 
 function manageDecodeJwtPart(value) {
@@ -865,10 +868,10 @@ function updateManageAccountControls() {
   if (current) current.disabled = !state.accounts.some(item => item.id === state.activeAccountId && manageAccountCanBatch(item)) || state.detectionRunning;
   const selectAll = $('manageSelectAll');
   if (selectAll) {
-    const available = state.accounts.filter(manageAccountCanBatch);
+    const available = manageFilteredBatchableAccounts();
     const allSelected = available.length > 0 && available.every(item => state.selectedAccountIds.has(item.id));
     selectAll.disabled = !available.length || allSelected || state.detectionRunning;
-    selectAll.textContent = '全选可用';
+    selectAll.textContent = available.length ? `全选筛选结果（${available.length}）` : '全选筛选结果';
   }
   const clearSelection = $('manageClearSelection');
   if (clearSelection) {
@@ -916,7 +919,10 @@ function renderManageProxyOptions() {
       option.selected = String(item.id) === current;
       select.append(option);
     });
-    if (!candidates.some(item => String(item.id) === current)) select.value = String(candidates[0].id);
+    if (!candidates.some(item => String(item.id) === current)) {
+      const saved = select.dataset.savedValue;
+      select.value = (saved && candidates.some(item => String(item.id) === saved)) ? saved : String(candidates[0].id);
+    }
   });
   const hint = $('manageDetectionStatus');
   if (hint && !state.detectionRunning) {
@@ -943,6 +949,7 @@ function syncManageDetectionProxyMode() {
   } else {
     hint.textContent = state.proxies.length ? '检测任务会使用已保存代理池，不会修改代理配置。' : '请先在“代理池”模块保存入口和支付出口代理。';
   }
+  persistManageDetectionProxyConfig();
 }
 
 function setManageDetectionStatus(value, isError = false) {
@@ -1010,6 +1017,59 @@ function persistManageDetectionConcurrency() {
     // 并发设置不影响检测任务本身，存储失败时仅对当前页面生效。
   }
 }
+
+function loadManageDetectionProxyConfig() {
+  try {
+    const raw = localStorage.getItem(MANAGE_DETECTION_PROXY_CONFIG_KEY);
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && typeof saved === 'object') return saved;
+  } catch (_) {
+    // 读取失败时使用表单当前值。
+  }
+  return null;
+}
+
+function persistManageDetectionProxyConfig() {
+  const config = currentManageDetectionProxyConfig();
+  try {
+    localStorage.setItem(MANAGE_DETECTION_PROXY_CONFIG_KEY, JSON.stringify(config));
+  } catch (_) {
+    // 代理来源记忆仅影响默认填充，存储失败时不影响检测任务。
+  }
+}
+
+function currentManageDetectionProxyConfig() {
+  return {
+    mode: $('manageDetectProxyMode')?.value || 'pool',
+    entryPoolId: String($('manageDetectEntryPool')?.value || ''),
+    exitPoolId: String($('manageDetectExitPool')?.value || ''),
+    localProxy: String($('manageDetectLocalProxy')?.value || ''),
+    manualEntryProxy: String($('manageDetectManualEntryProxy')?.value || ''),
+    manualExitProxy: String($('manageDetectManualExitProxy')?.value || '')
+  };
+}
+
+function applyManageDetectionProxyConfig(config) {
+  if (!config || typeof config !== 'object') return;
+  const mode = $('manageDetectProxyMode');
+  if (mode && config.mode) mode.value = config.mode;
+  if (config.entryPoolId !== undefined && config.entryPoolId !== null) {
+    const select = $('manageDetectEntryPool');
+    if (select) select.dataset.savedValue = config.entryPoolId;
+  }
+  if (config.exitPoolId !== undefined && config.exitPoolId !== null) {
+    const select = $('manageDetectExitPool');
+    if (select) select.dataset.savedValue = config.exitPoolId;
+  }
+  const localProxy = $('manageDetectLocalProxy');
+  if (localProxy && config.localProxy) localProxy.value = config.localProxy;
+  const manualEntry = $('manageDetectManualEntryProxy');
+  if (manualEntry && config.manualEntryProxy) manualEntry.value = config.manualEntryProxy;
+  const manualExit = $('manageDetectManualExitProxy');
+  if (manualExit && config.manualExitProxy) manualExit.value = config.manualExitProxy;
+  syncManageDetectionProxyMode();
+}
+
 
 function updateManageDetectionConcurrency() {
   manageDetectionConcurrencyLimit();
@@ -1942,8 +2002,7 @@ function bindEvents() {
     finally { event.target.value = ''; }
   });
   $('manageSelectAll')?.addEventListener('click', () => {
-    const available = state.accounts.filter(manageAccountCanBatch);
-    available.forEach(item => state.selectedAccountIds.add(item.id));
+    manageFilteredBatchableAccounts().forEach(item => state.selectedAccountIds.add(item.id));
     persistManageAccounts();
     renderFilteredAccounts();
     updateManageAccountControls();
@@ -1962,6 +2021,11 @@ function bindEvents() {
   $('manageDetectConcurrency')?.addEventListener('input', updateManageDetectionConcurrency);
   $('manageDetectConcurrency')?.addEventListener('change', updateManageDetectionConcurrency);
   $('manageDetectProxyMode')?.addEventListener('change', syncManageDetectionProxyMode);
+  $('manageDetectEntryPool')?.addEventListener('change', persistManageDetectionProxyConfig);
+  $('manageDetectExitPool')?.addEventListener('change', persistManageDetectionProxyConfig);
+  $('manageDetectLocalProxy')?.addEventListener('input', persistManageDetectionProxyConfig);
+  $('manageDetectManualEntryProxy')?.addEventListener('input', persistManageDetectionProxyConfig);
+  $('manageDetectManualExitProxy')?.addEventListener('input', persistManageDetectionProxyConfig);
   $('refreshAsn').addEventListener('click', loadAsn);
   $('refreshSuccesses').addEventListener('click', loadSuccesses);
   $('refreshLogs').addEventListener('click', loadLogs);
@@ -1977,6 +2041,7 @@ async function bootstrap() {
   syncManageDetectionConcurrency();
   $('logDay').value = new Date().toISOString().slice(0, 10);
   bindEvents();
+  applyManageDetectionProxyConfig(loadManageDetectionProxyConfig());
   try {
     const sessionState = await api('/api/manage/session');
     if (!sessionState.configured) {

@@ -1,11 +1,11 @@
 {
-  "id": "ppage_1U4HRoKslHRdbaPgWTxhlfLe",
+  "id": "ppage_1U521nC6h1nxGoI3cavhoOmW",
   "object": "checkout.session",
   "account_settings": {
-    "account_id": "acct_1Pj377KslHRdbaPg",
+    "account_id": "acct_1HOrSwC6h1nxGoI3",
     "assets": {
-      "icon": "https://stripe-camo.global.ssl.fastly.net/47fdcc5de4a1a21a44edfd25877c152ef14994b4442fc20e5cf40ad42ee49ae9/68747470733a2f2f66696c65732e7374726970652e636f6d2f66696c65732f4d44423859574e6a6446387855476f7a4e7a644c63327849556d52695956426e66475a6662476c325a5639744f54527752486872545463795158525a54545a4d525842795158517863327730306b64416f32696953/6d65726368616e745f69643d616363745f31506a3337374b736c4852646261506726636c69656e743d5041594d454e545f50414745",
-      "logo": "https://stripe-camo.global.ssl.fastly.net/8a78631620535f82ceed3c39e13ffcc4510151745db91ae7b7fac77661d14996/68747470733a2f2f66696c65732e7374726970652e636f6d2f66696c65732f4d44423859574e6a6446387855476f7a4e7a644c63327849556d52695956426e66475a6662476c325a5639334d486c454d6d4651576e67324f5852744e3074315532746c63487055576b4930303956446749344a31/6d65726368616e745f69643d616363745f31506a3337374b736c4852646261506726636c69656e743d5041594d454e545f50414745",
+      "icon": "https://d1wqzb5bdbcre6.cloudfront.net/87717978f78695d079dad368f8522493eb0724aceb7a4a24f2782025d5846c62/68747470733a2f2f66696c65732e7374726970652e636f6d2f66696c65732f4d44423859574e6a6446387853453979553364444e6d6778626e684862306b7a66475a6662476c325a563975596a52795348686b5644685361484e77536c5932526e4579533238356430673030516d4573564f305a/6d65726368616e745f69643d616363745f31484f725377433668316e78476f493326636c69656e743d5041594d454e545f50414745",
+      "logo": "https://d1wqzb5bdbcre6.cloudfront.net/53bae5275d5b1c7516221465ffc3a8a8d07654b61c3a5c79a4c61efd190c4fcb/68747470733a2f2f66696c65732e7374726970652e636f6d2f66696c65732f4d44423859574e6a6446387853453979553364444e6d6778626e684862306b7a66475a6662476c325a56394456454d774f445a735933673454306c78614574464e55745a5747644d626e51303049373734626e4d42/6d65726368616e745f69643d616363745f31484f725377433668316e78476f493326636c69656e743d5041594d454e545f50414745",
       "use_logo": false
     },
     "branding": {
@@ -15,11 +15,11 @@
       "font_family": "default"
     },
     "business_url": "https://openai.com",
-    "country": "IE",
-    "display_name": "OpenAI Ireland Limited",
-    "merchant_of_record_country": "IE",
-    "merchant_of_record_display_name": "OpenAI Ireland Limited",
-    "order_summary_display_name": "OpenAI Ireland Limited",
+    "country": "US",
+    "display_name": "OpenAI OpCo, LLC",
+    "merchant_of_record_country": "US",
+    "merchant_of_record_display_name": "OpenAI OpCo, LLC",
+    "order_summary_display_name": "OpenAI OpCo, LLC",
     "privacy_policy_url": "https://openai.com/privacy/",
     "specified_commercial_transactions_act_url": null,
     "statement_descriptor": "OPENAI",
@@ -40,19 +40,19 @@
   "cancel_url": null,
   "capture_method": null,
   "card_brand_choice": {
-    "eligible": true,
+    "eligible": false,
     "preferred_networks": [
       "cartes_bancaires"
     ],
     "supported_cobranded_networks": {
-      "cartes_bancaires": true
+      "cartes_bancaires": false
     }
   },
   "card_brands": {
     "accel": false,
     "amex": true,
     "carnet": false,
-    "cartes_bancaires": true,
+    "cartes_bancaires": false,
     "conecs": false,
     "diners": true,
     "discover": true,
@@ -73,7 +73,7 @@
   },
   "checkout_multistep_ui": false,
   "client_reference_id": null,
-  "config_id": "3deefe01-2971-49fd-9908-f02028ba3fa6",
+  "config_id": "fcb47a63-136f-4299-a695-3f32e77486bf",
   "consent": null,
   "consent_collection": {
     "payment_method_reuse_agreement": null,
@@ -82,7 +82,7 @@
   },
   "cross_sell_group": null,
   "crypto_in_link_ui_enabled": false,
-  "currency": "eur",
+  "currency": "usd",
   "custom_components": [],
   "custom_fields": [],
   "custom_text": {
@@ -92,28 +92,28 @@
     "terms_of_service_acceptance": null
   },
   "customer": {
-    "id": "cus_V48gZ6RSRVPZtP",
+    "id": "cus_V26Nvg2FzOGVyY",
     "object": "customer",
     "address": {
-      "city": "Berlin",
-      "country": "DE",
-      "line1": "Lützowplatz 17",
+      "city": "Dallas",
+      "country": "US",
+      "line1": "555 S Lamar St",
       "line2": null,
-      "postal_code": "10785",
-      "state": "BE"
+      "postal_code": "75202",
+      "state": "TX"
     },
     "business_name": null,
     "card_art": null,
     "customer_provided": true,
-    "email": "jaunty.merino.5h+kpao@icloud.com",
+    "email": "charged_lagers_3r@icloud.com",
     "has_fallback_payment_method": false,
     "individual_name": null,
-    "name": "Alex Meyer",
+    "name": "Taylor Reed",
     "payment_methods": [],
     "phone": null,
     "tax_ids": []
   },
-  "customer_email": "jaunty.merino.5h+kpao@icloud.com",
+  "customer_email": "charged_lagers_3r@icloud.com",
   "customer_managed_saved_payment_methods_offer_save": {
     "enabled": true,
     "status": "not_accepted"
@@ -121,34 +121,34 @@
   "developer_tool_context": null,
   "display_consent_collection_promotions": false,
   "does_not_collect_postal_code_for_non_us_card_transactions": false,
-  "eid": "NA",
+  "eid": "49922e88-161b-47dd-bdbe-baf0bd9e26d1",
   "elements_options": {
-    "__checkout_session_id": "cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG",
-    "__custom_checkout_customer_name": "Alex Meyer",
+    "__checkout_session_id": "cs_live_a1b9PjUTLpeERviGpQ7UZLRAZNsjqmdzQvVm43xynAs02fc2f292CqewRz",
+    "__custom_checkout_customer_name": "Taylor Reed",
     "__payment_pages_experiments": [
       {
-        "event_id": "0cde03bf-9181-4af6-8edb-b1ccddf8bafd",
+        "event_id": "9b284a0d-f010-4d07-a3fd-5f3315f32f51",
         "exposure_event_name": "experiment_exposure",
         "name": "guacamole_resend_otp",
         "variant": "control"
       },
       {
-        "event_id": "a8e0e3cc-2b8e-4451-bd8c-dc05aab19210",
+        "event_id": "268be120-90c0-4c36-84e8-ad97c9d6e456",
         "exposure_event_name": "",
         "name": "link_global_holdback_ewcs_aa",
         "variant": "control"
       },
       {
-        "event_id": "fccb6a01-0d71-46da-ac1b-bd581ffe9542",
+        "event_id": "7f1c779f-2450-4a68-ba45-20ac9e2811fe",
         "exposure_event_name": "",
         "name": "link_global_holdback_ewcs",
         "variant": "control"
       }
     ],
     "amount": 0,
-    "currency": "eur",
+    "currency": "usd",
     "mode": "subscription",
-    "payment_method_configuration": "pmc_1Q81OxKslHRdbaPgxTOEWuAL",
+    "payment_method_configuration": "pmc_1TD5SHC6h1nxGoI3h08WNJFf",
     "payment_method_types": [
       "card",
       "paypal"
@@ -190,29 +190,29 @@
       "enabled": false
     }
   ],
-  "enforcement_mode": "restricted",
+  "enforcement_mode": "open",
   "experiment_data": [
     {
-      "event_id": "0cde03bf-9181-4af6-8edb-b1ccddf8bafd",
+      "event_id": "9b284a0d-f010-4d07-a3fd-5f3315f32f51",
       "exposure_event_name": "experiment_exposure",
       "name": "guacamole_resend_otp",
       "variant": "control"
     },
     {
-      "event_id": "a8e0e3cc-2b8e-4451-bd8c-dc05aab19210",
+      "event_id": "268be120-90c0-4c36-84e8-ad97c9d6e456",
       "exposure_event_name": "",
       "name": "link_global_holdback_ewcs_aa",
       "variant": "control"
     },
     {
-      "event_id": "fccb6a01-0d71-46da-ac1b-bd581ffe9542",
+      "event_id": "7f1c779f-2450-4a68-ba45-20ac9e2811fe",
       "exposure_event_name": "",
       "name": "link_global_holdback_ewcs",
       "variant": "control"
     }
   ],
   "experiments_data": {
-    "event_id": "ae6dee4e-1ff8-4076-aa3b-3091a46c4bd2",
+    "event_id": "16c00b4c-d819-4432-b3fc-148058b2b9ef",
     "experiment_assignments": {
       "checkout_bancontact_name_optional_one_time": "control",
       "checkout_eps_name_optional": "control",
@@ -223,9 +223,8 @@
       "cpl_spicy_guacamole": "control",
       "cpl_unified_order_summary_experiment": "control",
       "emea_wallets_ideal_wero_rebranding": "control",
-      "ff_checkout_cpl_lid_promo_badge_color_opt": "control",
+      "ff_checkout_cpl_lid_promo_badge_color_opt": "treatment",
       "ff_checkout_custom_flag_server_updates_on_canconfirm": "control",
-      "ff_checkout_optimized_image_eff": "control",
       "ff_checkout_test_frontend_eff": "control",
       "link_ab_test": "control",
       "link_ab_test_aa": "control",
@@ -269,9 +268,11 @@
     "checkout_ewcs_optional_items": true,
     "checkout_guacamole_custom_amounts": true,
     "checkout_hcaptcha_redundancy_control_enabled": true,
+    "checkout_hide_mandate_text": true,
     "checkout_link_enable_ewcs_customer_name_prefill": true,
     "checkout_link_enable_mfa": true,
     "checkout_link_in_habanero_enabled": true,
+    "checkout_link_phone_registration_treatment_1_enabled": true,
     "checkout_link_purchase_protections_rollout": true,
     "checkout_optional_items": true,
     "checkout_passive_captcha": true,
@@ -284,12 +285,12 @@
     "sandboxes_rebrand_testmode": true
   },
   "geocoding": {
-    "country_code": "BR",
-    "region_name": null
+    "country_code": "US",
+    "region_name": "OR"
   },
   "has_async_attached_payment_method": false,
   "has_dynamic_tax_rates": false,
-  "init_checksum": "1WPJmQwTQM38Edb5DhaPWC1LF5ULexS5",
+  "init_checksum": "zFmVkwYYPmHHgEL488JDa5rWOeNRvaE6",
   "integration_identifier": null,
   "invoice": {
     "object": "invoice",
@@ -297,7 +298,7 @@
     "amount_due_applied_to_balance": false,
     "applied_balance": 0,
     "billing_cycle_anchor": null,
-    "currency": "eur",
+    "currency": "usd",
     "ending_balance": null,
     "frozen": false,
     "has_prorations": false,
@@ -307,7 +308,7 @@
         {
           "object": "line_item",
           "adjustable_quantity": null,
-          "amount": 1933,
+          "amount": 2000,
           "checkout_item_metadata": {
             "cross_sell_from": null,
             "is_removable": false,
@@ -320,11 +321,11 @@
             "link_intelligence_offer_target_interval": null,
             "link_intelligence_offer_target_product_name": null
           },
-          "currency": "eur",
+          "currency": "usd",
           "description": "ChatGPT Plus Subscription",
           "discount_amounts": [
             {
-              "amount": 1933,
+              "amount": 2000,
               "coupon": {
                 "object": "coupon",
                 "amount_off": null,
@@ -335,23 +336,23 @@
                 "name": "ChatGPT Plus - 1 Month Free Trial",
                 "percent_off": 100.0
               },
-              "currency": "eur",
+              "currency": "usd",
               "intervals": null,
               "promotion_code": null
             }
           ],
           "images": null,
-          "line_item_id": "li_1U4HRzKslHRdbaPg0uXYwk0O",
+          "line_item_id": "li_1U521uC6h1nxGoI3bbJnVWgd",
           "price": {
-            "id": "price_1QrN9EKslHRdbaPgpE8MUv03",
+            "id": "price_1MWW51C6h1nxGoI30udZUgPl",
             "object": "price",
             "active": true,
             "billing_scheme": "per_unit",
-            "currency": "eur",
+            "currency": "usd",
             "custom_unit_amount": null,
             "livemode": true,
             "product": {
-              "id": "prod_QzgeNOhrw3TOc1",
+              "id": "prod_N9DMeqbltqZchv",
               "object": "product",
               "active": true,
               "addons": null,
@@ -374,27 +375,27 @@
             "tiers_mode": null,
             "transform_quantity": null,
             "type": "recurring",
-            "unit_amount": 1933,
-            "unit_amount_decimal": "1933"
+            "unit_amount": 2000,
+            "unit_amount_decimal": "2000"
           },
           "proration": false,
           "quantity": 1,
-          "recurring_amount": 1933,
+          "recurring_amount": 2000,
           "recurring_discount_amounts": [],
           "recurring_tax_amounts": [
             {
-              "amount": 367,
+              "amount": 128,
               "inclusive": false,
               "tax_rate": {
                 "object": "tax_rate",
-                "active": true,
+                "active": false,
                 "description": null,
-                "display_name": "VAT",
+                "display_name": "Sales Tax",
                 "inclusive": false,
-                "percentage": 19.0,
+                "percentage": 8.0,
                 "rate_type": "percentage"
               },
-              "taxable_amount": 1933
+              "taxable_amount": 1600
             }
           ],
           "recurring_tier_amounts": null,
@@ -405,11 +406,11 @@
               "inclusive": false,
               "tax_rate": {
                 "object": "tax_rate",
-                "active": true,
+                "active": false,
                 "description": null,
-                "display_name": "VAT",
+                "display_name": "Sales Tax",
                 "inclusive": false,
-                "percentage": 19.0,
+                "percentage": 8.0,
                 "rate_type": "percentage"
               },
               "taxable_amount": 0
@@ -418,8 +419,8 @@
           "tier_amounts": null,
           "tiers": null,
           "type": "checkout_invoice_line_item",
-          "unit_amount": 1933,
-          "unit_amount_decimal": "1933"
+          "unit_amount": 2000,
+          "unit_amount_decimal": "2000"
         }
       ],
       "has_more": false,
@@ -427,11 +428,11 @@
       "url": null
     },
     "pre_payment_credit_notes_amount": 0,
-    "subtotal": 1933,
+    "subtotal": 2000,
     "total": 0,
     "total_discount_amounts": [
       {
-        "amount": 1933,
+        "amount": 2000,
         "coupon": {
           "object": "coupon",
           "amount_off": null,
@@ -442,7 +443,7 @@
           "name": "ChatGPT Plus - 1 Month Free Trial",
           "percent_off": 100.0
         },
-        "currency": "eur",
+        "currency": "usd",
         "intervals": 1,
         "locked": false,
         "promotion_code": null
@@ -454,11 +455,11 @@
         "inclusive": false,
         "tax_rate": {
           "object": "tax_rate",
-          "active": true,
+          "active": false,
           "description": null,
-          "display_name": "VAT",
+          "display_name": "Sales Tax",
           "inclusive": false,
-          "percentage": 19.0,
+          "percentage": 8.0,
           "rate_type": "percentage"
         },
         "taxable_amount": 0
@@ -474,12 +475,13 @@
   "link_settings": {
     "consumer_found": false,
     "enable_partner_lookup": false,
-    "hcaptcha_rqdata": "SX/Irg3yByJ87bcwwQZzV3YtziLFGbCveR5C0k+70QcwjsYrlaUYqomZbZAh0tvn9PPB0NYE4BgblWEoIP2AqAMtKD4cC/iQXX7v/UL5Y2SIZ+QA4xaskYNlWEdQ69GTZGaCw5uWbqg9NjCmKzvJs5fSwcBWghVoN/mVzYjZqbEh3GgA7h/+0LA0VDd8S5oA8nX2OBsPhuYBfVqjdDAWY5icNz/YPqJWcaHgi44kzKviqNc1uaPCwNo3rIWoXWusaaC+dUhr1DS3uTS6r4a3Og==5VDZilxXRow//q3p",
+    "hcaptcha_rqdata": "duX9TxcG8LBaxlKiWPbbgJGKu9A9n30InJz6Z5EOntqiWGWF3JeUMitDzIIk0qPRZhX3tYwM2kqYzKSVEUTfvVIkUB/ykb1TBaCq24On3TwAMW2GY1+WH/3BqdoAjerCjMJd2ICv9MbScN5FHhyS4ITFG7LS0tU+O0Gi9MjywzuSCV1Yx2Jp5EWWGDwpCL5VYWYX3qrLjzDSfc3WxwGqH7oDPcNz9Yx2N2PUHJAbY9EgR+aIyqPMq6Bn3tXgGeodbMXAViJXSGDKC5N9g6M+zw==rpWM4QAxZAhVikga",
     "hcaptcha_site_key": "24ed0064-62cf-4d42-9960-5dd1a41d4e29",
     "link_brand": "link",
     "link_consumer_incentive": null,
     "link_funding_sources": [
-      "CARD"
+      "CARD",
+      "BANK_ACCOUNT"
     ],
     "link_mode": "LINK_CARD_BRAND",
     "link_payment_session_context": {
@@ -487,11 +489,13 @@
       "bank_account_verification_method": null,
       "link_payment_method_bank_account_permissions": null,
       "link_supported_payment_methods": [
-        "CARD"
+        "CARD",
+        "INSTANT_DEBITS"
       ]
     },
     "link_supported_payment_methods": [
-      "CARD"
+      "CARD",
+      "INSTANT_DEBITS"
     ],
     "link_supported_payment_methods_onboarding_enabled": [
       "CARD"
@@ -499,20 +503,20 @@
     "link_us_bank_account_funding_source_enabled": false
   },
   "livemode": true,
-  "locale": "de",
+  "locale": "en",
   "lpm_settings": null,
   "managed_payments": {
     "enabled": false
   },
-  "management_url": "https://help.openai.com",
+  "management_url": "https://pay.openai.com",
   "mode": "subscription",
   "name_collection": null,
   "on_behalf_of": null,
   "ordered_payment_method_types": [
     "card",
+    "paypal",
     "apple_pay",
-    "google_pay",
-    "paypal"
+    "google_pay"
   ],
   "origin_context": null,
   "payment_collection_context": null,
@@ -572,83 +576,85 @@
       "enabled": false
     },
     "returns": {
-      "custom_message": null,
+      "custom_message": "",
       "enabled": false,
       "exceptions_apply": false,
-      "exchanges_accepted": false,
-      "fee_required": null,
-      "fee_type": null,
-      "logistics": [],
-      "policy_url": null,
-      "refunds_accepted": null,
-      "returns_accepted": null,
-      "window": null,
-      "window_start": null
+      "exchanges_accepted": true,
+      "fee_required": false,
+      "fee_type": "NO_FEE",
+      "logistics": [
+        "LABEL_PROVIDED_AUTOMATICALLY"
+      ],
+      "policy_url": "",
+      "refunds_accepted": false,
+      "returns_accepted": true,
+      "window": 60,
+      "window_start": "FROM_DELIVERY"
     }
   },
   "prefilled": null,
   "receipt_emails_enabled": false,
   "recurring_details": {
-    "subtotal": 1933,
-    "total": 2300,
+    "subtotal": 2000,
+    "total": 2128,
     "total_discount_amounts": [],
     "total_summary": {
-      "due": 2300,
-      "subtotal": 1933,
-      "total": 2300,
+      "due": 2128,
+      "subtotal": 2000,
+      "total": 2128,
       "total_discount_amount_aggregate": 0,
       "total_discount_amounts": [],
       "total_proration_amount_aggregate": 0,
       "total_tax_amounts": [
         {
-          "amount": 367,
+          "amount": 128,
           "inclusive": false,
           "tax_rate": {
             "object": "tax_rate",
-            "active": true,
+            "active": false,
             "description": null,
-            "display_name": "VAT",
+            "display_name": "Sales Tax",
             "inclusive": false,
-            "percentage": 19.0,
+            "percentage": 8.0,
             "rate_type": "percentage"
           },
-          "taxable_amount": 1933
+          "taxable_amount": 1600
         }
       ]
     },
     "total_tax_amounts": [
       {
-        "amount": 367,
+        "amount": 128,
         "inclusive": false,
         "tax_rate": {
           "object": "tax_rate",
-          "active": true,
+          "active": false,
           "description": null,
-          "display_name": "VAT",
+          "display_name": "Sales Tax",
           "inclusive": false,
-          "percentage": 19.0,
+          "percentage": 8.0,
           "rate_type": "percentage"
         },
-        "taxable_amount": 1933
+        "taxable_amount": 1600
       }
     ]
   },
   "redirect_on_completion": null,
-  "return_url": "https://chatgpt.com/checkout/verify?stripe_session_id=cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG&processor_entity=openai_ie&plan_type=plus",
+  "return_url": "https://chatgpt.com/checkout/verify?stripe_session_id=cs_live_a1b9PjUTLpeERviGpQ7UZLRAZNsjqmdzQvVm43xynAs02fc2f292CqewRz&processor_entity=openai_llc&plan_type=plus",
   "route_to_orchestration_interface": false,
-  "rqdata": "XiZzpMilbb5wbwlgpHZ7MZy1PpgS8ar80ljdHcMvvEG6xjVKDyzyo7FaE9mGaNrNKgGb9BHBKjB6eROHEMz96ip39jIrLrww0pS953c7uTeca0tbOrvB4pP3YzyocgKX90OjSSqHhOL+X1sM043liwpz+6+VlXm9aND5JVXK/Dk1N35sNm41cWPS+jR1KQhs5wIkUpshi4Ef5WwraIYCe1c5G2JLoDAHHCHx+64ONBjUoDhsFOzOoklrxGvRNKiwhbpNvpMYAsWzUlN/ohpRrw==7RfssWj1BBjh3ks3",
+  "rqdata": "p8okUiaD898Ov4jhE7XhtnMPspO4m07nqdZN+eaMrX21/es7F+H4bCMTyc3h5gzmL4C4Q1Gz1QNz/ZVuCt+dp5eADUk6JmWA1o41sjTzHq9Mdp/bfRb+Ejf5MtDr8tpvqe9RBJnyGNTQjat2XhrkW+OXEAOB5JSh/Gyjd2GH3VzXoIEX5m9hZ2Y+XMF3ZvmjNKaCpHFquEeITl+lGxs5doC0yh7KAM4wIS0JR2z0ZgusbfGZmrMaRYbd49bufEoIHK+tsda8lleQzhHYtOmaog==UMdAqAkAXP1MzVBZ",
   "sepa_debit_info": null,
-  "session_id": "cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG",
+  "session_id": "cs_live_a1b9PjUTLpeERviGpQ7UZLRAZNsjqmdzQvVm43xynAs02fc2f292CqewRz",
   "setup_future_usage": null,
   "setup_future_usage_for_payment_method_type": {},
   "setup_intent": {
-    "id": "seti_1U4HSBKslHRdbaPgFMM9SMID",
+    "id": "seti_1U5223C6h1nxGoI3NaOyRw3y",
     "object": "setup_intent",
     "allowed_payment_method_types": null,
     "automatic_payment_methods": null,
     "cancellation_reason": null,
-    "client_secret": "seti_1U4HSBKslHRdbaPgFMM9SMID_secret_V4QIdWTCy9oDz29f3DHHflCKlmcFMsu",
-    "created": 1786699867,
+    "client_secret": "seti_1U5223C6h1nxGoI3NaOyRw3y_secret_V5CQmTu2GbpFYqM8TjkftCqwfYn0wIA",
+    "created": 1786878915,
     "description": null,
     "excluded_payment_method_types": null,
     "last_setup_error": {
@@ -657,24 +663,24 @@
       "doc_url": "https://stripe.com/docs/error-codes/setup-attempt-failed",
       "message": "The latest attempt to set up the payment method has failed.",
       "payment_method": {
-        "id": "pm_1U4HS7KslHRdbaPgcw2odzp5",
+        "id": "pm_1U5220C6h1nxGoI30iSd41AA",
         "object": "payment_method",
         "allow_redisplay": "limited",
         "billing_details": {
           "address": {
-            "city": "Berlin",
-            "country": "DE",
-            "line1": "Lützowplatz 17",
+            "city": "Dallas",
+            "country": "US",
+            "line1": "555 S Lamar St",
             "line2": null,
-            "postal_code": "10785",
-            "state": "BE"
+            "postal_code": "75202",
+            "state": "TX"
           },
-          "email": "checkout-513e91a2a4@outlook.com",
-          "name": "Alex Meyer",
+          "email": "checkout-c4f81e6ae4@outlook.com",
+          "name": "Taylor Reed",
           "phone": null,
           "tax_id": null
         },
-        "created": 1786699863,
+        "created": 1786878912,
         "customer": null,
         "customer_account": null,
         "livemode": true,
@@ -707,9 +713,9 @@
   "state": "active",
   "statement_descriptor": "OPENAI *CHATGPT SUBSCR",
   "status": "open",
-  "stripe_hosted_url": "https://checkout.stripe.com/c/pay/cs_live_a1srB9GSQMOftACOoEPi5SUnsuXPL0C3WvR8du5XrZI8NClXV8kc2gpPWG#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPydhYCcpJ3ZwZ3Zmd2x1cWxqa1BrbHRwYGtgdnZAa2RnaWBhJz9jZGl2YCknZHVsTmB8Jz8ndW5aaWxzYFowNFVvNjIyTnZpTVdhZ2RVYlFPXG9RbX9NNmMwYXE0SzRzTjJJUHU1dG01fEtWZHdtY18za2NnQjJDQ2ltPU5JfVNuc2FIUkswajNIZjFTYWQzS01kVmtkUzU1RjdWZ2k9X3YnKSdjd2poVmB3c2B3Jz9xd3BgKSdnZGZuYndqcGthRmppancnPycmY2NjY2NjJyknaWR8anBxUXx1YCc%2FJ3Zsa2JpYFpscWBoJyknYGtkZ2lgVWlkZmBtamlhYHd2Jz9xd3BgeCUl",
+  "stripe_hosted_url": "https://checkout.stripe.com/c/pay/cs_live_a1b9PjUTLpeERviGpQ7UZLRAZNsjqmdzQvVm43xynAs02fc2f292CqewRz#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdpamZkaWAnPydgaycpJ3ZwZ3Zmd2x1cWxqa1BrbHRwYGtgdnZAa2RnaWBhJz9jZGl2YCknZHVsTmB8Jz8ndW5aaWxzYFowNE1Kd1ZyRjNtNGt9QmpMNmlRRGJXb1xTd38xYVA2Y1NKZGd8RmZOVzZ1Z0BPYnBGU0RpdEZ9YX1GUHNqV200XVJyV2RmU2xqc1A2bklOc3Vub20yTHRuUjU1bF1Udm9qNmsnKSdjd2poVmB3c2B3Jz9xd3BgKSdnZGZuYndqcGthRmppancnPycmY2NjY2NjJyknaWR8anBxUXx1YCc%2FJ3Zsa2JpYFpscWBoJyknYGtkZ2lgVWlkZmBtamlhYHd2Jz9xd3BgeCUl",
   "submission_attempt": {
-    "id": "cs_attempt_1U4HS8KslHRdbaPgYS1OTuXZ",
+    "id": "cs_attempt_1U5220C6h1nxGoI33U7PGLLm",
     "error": {
       "code": "checkout_approval_payment_failure_with_payment_error",
       "decline_code": null,
@@ -731,7 +737,7 @@
   "subscription_settings": {
     "enabled": false,
     "merchant_login_page_url": null,
-    "portal_login_page_slug": null
+    "portal_login_page_slug": "9AQ00E6P7cZ59PidQQ"
   },
   "success_url": null,
   "tax_context": {
@@ -741,7 +747,7 @@
     "automatic_tax_error": null,
     "automatic_tax_exempt": "none",
     "automatic_tax_taxability_reason": null,
-    "customer_tax_country": "DE",
+    "customer_tax_country": "US",
     "dynamic_tax_enabled": false,
     "has_maximum_tax_ids": false,
     "tax_id_collection_enabled": true,
@@ -754,17 +760,17 @@
     "error_reason": null,
     "status": "complete"
   },
-  "token_notification_url": "https://pm-hooks.stripe.com/apple_pay/merchant_token/pDq7tf9uieoQWMVJixFwuOve/acct_1Pj377KslHRdbaPg/",
+  "token_notification_url": "https://pm-hooks.stripe.com/apple_pay/merchant_token/pDq7tf9uieoQWMVJixFwuOve/acct_1HOrSwC6h1nxGoI3/",
   "total_summary": {
     "amount_due_applied_to_balance": false,
     "applied_balance": 0,
     "due": 0,
-    "subtotal": 1933,
+    "subtotal": 2000,
     "total": 0,
-    "total_discount_amount_aggregate": 1933,
+    "total_discount_amount_aggregate": 2000,
     "total_discount_amounts": [
       {
-        "amount": 1933,
+        "amount": 2000,
         "coupon": {
           "object": "coupon",
           "amount_off": null,
@@ -775,7 +781,7 @@
           "name": "ChatGPT Plus - 1 Month Free Trial",
           "percent_off": 100.0
         },
-        "currency": "eur",
+        "currency": "usd",
         "intervals": 1,
         "locked": false,
         "promotion_code": null
@@ -788,11 +794,11 @@
         "inclusive": false,
         "tax_rate": {
           "object": "tax_rate",
-          "active": true,
+          "active": false,
           "description": null,
-          "display_name": "VAT",
+          "display_name": "Sales Tax",
           "inclusive": false,
-          "percentage": 19.0,
+          "percentage": 8.0,
           "rate_type": "percentage"
         },
         "taxable_amount": 0
