@@ -714,6 +714,79 @@ function persistManageAccounts() {
   }
 }
 
+function accountConfigPayload() {
+  const stored = parseStorage(ACCOUNT_STORAGE_KEY) || {};
+  return {
+    format: 'pay153.manage.accounts',
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    activeId: state.activeAccountId || '',
+    selectedIds: [...state.selectedAccountIds],
+    accounts: Array.isArray(stored.accounts) ? stored.accounts : state.accounts.map(item => ({...item}))
+  };
+}
+
+function downloadManageJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.style.display = 'none';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function exportManageAccounts() {
+  if (!state.accounts.length) {
+    setMessage($('manageAccountStatus'), '当前账号库没有可导出的账号', true);
+    return;
+  }
+  downloadManageJson(`pay153-account-config-${new Date().toISOString().slice(0, 10)}.json`, accountConfigPayload());
+  setMessage($('manageAccountStatus'), `已导出 ${state.accounts.length} 个账号及其备注、优惠、支付方式配置`);
+}
+
+function importManageAccountConfig(file) {
+  if (!file) return;
+  file.text().then(raw => {
+    let payload;
+    try { payload = JSON.parse(raw); } catch (_) { throw new Error('账号配置 JSON 无法解析'); }
+    if (payload?.format !== 'pay153.manage.accounts' || !Array.isArray(payload.accounts)) {
+      throw new Error('不是 PAY.153 账号配置文件');
+    }
+    let added = 0;
+    let updated = 0;
+    for (const source of payload.accounts) {
+      if (!source || typeof source !== 'object') continue;
+      const token = String(source.token || source.raw || '').trim();
+      if (!token) continue;
+      const parsed = parseManageAccountRaw(token, '账号配置导入');
+      const restored = {
+        ...parsed,
+        ...source,
+        id: String(source.id || parsed.id),
+        raw: String(source.raw || parsed.raw || token),
+        token,
+        email: String(source.email || parsed.email || ''),
+        accountId: String(source.accountId || parsed.accountId || ''),
+        note: String(source.note || '').slice(0, 500),
+        discounts: normalizeAccountDiscounts(source.discounts),
+        paymentMethods: accountMethods(source.paymentMethods),
+        checkoutProtocols: accountProtocols(source.checkoutProtocols),
+        lifecycle: normalizeAccountLifecycle(source.lifecycle),
+        updatedAt: Number(source.updatedAt || Date.now())
+      };
+      const result = upsertManageAccount(restored);
+      if (result.added) added += 1; else updated += 1;
+    }
+    persistManageAccounts();
+    refreshManageAccountState();
+    setMessage($('manageAccountStatus'), `配置导入完成：新增 ${added}，更新 ${updated}；备注、优惠、支付方式已恢复`);
+  }).catch(error => setMessage($('manageAccountStatus'), error.message || String(error), true));
+}
+
 function refreshManageAccountState() {
   const payload = parseStorage(ACCOUNT_STORAGE_KEY) || {};
   state.accounts = localAccountList();
@@ -2066,6 +2139,11 @@ function bindEvents() {
     clearManageAccountSelection(null, '已取消全部账号勾选');
   });
   $('manageExportEmails')?.addEventListener('click', exportManageAccountEmails);
+  $('manageExportAccounts')?.addEventListener('click', exportManageAccounts);
+  $('manageAccountConfigInput')?.addEventListener('change', (event) => {
+    importManageAccountConfig(event.target.files?.[0]);
+    event.target.value = '';
+  });
   $('manageClearAll')?.addEventListener('click', clearManageAccounts);
   $('manageDetectCurrent')?.addEventListener('click', () => {
     if (state.activeAccountId) void startManageProtocolDetection([state.activeAccountId]);
