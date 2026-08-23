@@ -13,3 +13,4 @@ backups/
 *.jsonl
 *.zip
 node_modules/
+docs
