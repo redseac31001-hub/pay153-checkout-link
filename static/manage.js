@@ -162,6 +162,13 @@ function accountMethods(value) {
   }, {});
 }
 
+function normalizeAccountDiscounts(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const clean = item => ({percent: Math.max(0, Math.min(100, Number(item?.percent || 0) || 0)), fixed: Math.max(0, Number(item?.fixed || 0) || 0)});
+  const regions = Array.isArray(source.regions) ? source.regions.slice(0, 30).map(item => ({country: String(item?.country || '').trim().toUpperCase().slice(0, 8), currency: String(item?.currency || '').trim().toUpperCase().slice(0, 8), ...clean(item)})).filter(item => item.country || item.currency) : [];
+  return {global: clean(source.global), regions};
+}
+
 function normalizeAccountProtocol(value) {
   const normalized = String(value || '').trim().toLowerCase();
   return ['oaics', 'cs', 'unknown'].includes(normalized) ? normalized : 'unknown';
@@ -259,6 +266,8 @@ function localAccountList() {
     source: String(item.source || '本机'),
     promoStatus: ['supported', 'unsupported', 'unknown'].includes(item.promoStatus) ? item.promoStatus : 'unknown',
     promoReason: String(item.promoReason || '').slice(0, 240),
+    note: String(item.note || '').slice(0, 500),
+    discounts: normalizeAccountDiscounts(item.discounts),
     paymentMethods: accountMethods(item.paymentMethods),
     checkoutProtocols: accountProtocols(item.checkoutProtocols),
     lifecycle: normalizeAccountLifecycle(item.lifecycle),
@@ -366,6 +375,7 @@ function renderAccounts(items, pagination = {}) {
     identityMeta.className = 'subtle';
     identityMeta.textContent = item.accountId ? `ID ${maskLocalAccount(item.accountId)}` : text(item.kind, 'Token');
     identity.append(title, identityMeta);
+    if (item.note) { const note = document.createElement('div'); note.className = 'account-row-note'; note.textContent = `备注：${item.note}`; identity.append(note); }
     const email = manageAccountEmail(item);
     if (revealedManageEmailIds.has(item.id)) {
       const emailValue = document.createElement('div');
@@ -462,6 +472,7 @@ function renderAccounts(items, pagination = {}) {
     emailButton.disabled = !email;
     emailButton.title = email ? '仅在当前管理页面展开完整邮箱' : '当前账号没有可展示的邮箱';
     const useButton = makeButton('使用', 'use-account');
+    const editButton = makeButton('编辑', 'edit-account');
     useButton.disabled = item.lifecycle !== 'active';
     useButton.title = item.lifecycle === 'active' ? '设为工作台当前账号' : '请先将生命周期改为正常';
     const detectButton = makeButton('检测', 'detect-account');
@@ -470,6 +481,7 @@ function renderAccounts(items, pagination = {}) {
     const actions = makeActions(
       emailButton,
       useButton,
+      editButton,
       detectButton,
       makeButton('移除', 'remove-account', true)
     );
@@ -596,6 +608,8 @@ function parseManageAccountRaw(raw, source = '手动粘贴') {
     label: email || (accountId ? `账号 ${shortId}` : `${kind === 'session' ? 'Session' : 'Token'} ${shortId}`),
     promoStatus: 'unknown',
     promoReason: '',
+    note: '',
+    discounts: normalizeAccountDiscounts(),
     paymentMethods: {},
     checkoutProtocols: {},
     lifecycle: 'active',
@@ -672,6 +686,8 @@ function persistManageAccounts() {
       frozenAt: Number(item.frozenAt || 0),
       promoStatus: item.promoStatus || 'unknown',
       promoReason: String(item.promoReason || '').slice(0, 240),
+      note: String(item.note || '').slice(0, 500),
+      discounts: normalizeAccountDiscounts(item.discounts),
       paymentMethods: accountMethods(item.paymentMethods),
       checkoutProtocols: accountProtocols(item.checkoutProtocols),
       lifecycle: normalizeAccountLifecycle(item.lifecycle),
@@ -1921,6 +1937,7 @@ function bindTableActions() {
     const id = button.closest('tr')?.dataset.id;
     if (!id) return;
     if (button.dataset.action === 'use-account') useManageAccount(id);
+    if (button.dataset.action === 'edit-account') openManageAccountEditor(id);
     if (button.dataset.action === 'toggle-email') toggleManageAccountEmail(id);
     if (button.dataset.action === 'detect-account') void startManageProtocolDetection([id]);
     if (button.dataset.action === 'remove-account') removeManageAccount(id);
@@ -1945,7 +1962,44 @@ function bindTableActions() {
   });
 }
 
+function openManageAccountEditor(id) {
+  const item = state.accounts.find(account => account.id === id);
+  if (!item) return;
+  const modal = $('accountEditModal');
+  modal.hidden = false;
+  $('accountEditId').value = id;
+  $('accountEditTitle').textContent = `编辑账号 · ${maskLocalAccount(item.label || item.email || item.accountId)}`;
+  $('accountEditNote').value = item.note || '';
+  const discounts = normalizeAccountDiscounts(item.discounts);
+  $('accountDiscountPercent').value = discounts.global.percent || '';
+  $('accountDiscountFixed').value = discounts.global.fixed || '';
+  $('accountDiscountRegions').value = discounts.regions.map(region => [region.country, region.currency, region.percent || '', region.fixed || ''].join(',')).join('\n');
+  const methods = item.paymentMethods || {};
+  qsa('[data-account-method]', modal).forEach(input => { input.checked = methods[input.dataset.accountMethod] === 'supported'; });
+}
+
+function closeManageAccountEditor() { if ($('accountEditModal')) $('accountEditModal').hidden = true; }
+
+function saveManageAccountEditor() {
+  const item = state.accounts.find(account => account.id === $('accountEditId').value);
+  if (!item) return;
+  const regions = $('accountDiscountRegions').value.split(/\r?\n/).map(line => {
+    const [country, currency, percent, fixed] = line.split(',').map(value => String(value || '').trim());
+    return {country, currency, percent: Number(percent || 0), fixed: Number(fixed || 0)};
+  }).filter(region => region.country || region.currency);
+  item.note = String($('accountEditNote').value || '').trim().slice(0, 500);
+  item.discounts = normalizeAccountDiscounts({global: {percent: $('accountDiscountPercent').value, fixed: $('accountDiscountFixed').value}, regions});
+  item.paymentMethods = accountMethods(item.paymentMethods);
+  qsa('[data-account-method]', $('accountEditModal')).forEach(input => { item.paymentMethods[input.dataset.accountMethod] = input.checked ? 'supported' : 'unknown'; });
+  item.updatedAt = Date.now();
+  persistManageAccounts(); refreshManageAccountState(); closeManageAccountEditor();
+  setMessage($('manageAccountStatus'), '账号备注、优惠和支付方式已保存');
+}
+
 function bindEvents() {
+  $('accountEditClose')?.addEventListener('click', closeManageAccountEditor);
+  $('accountEditSave')?.addEventListener('click', saveManageAccountEditor);
+  $('accountEditModal')?.addEventListener('click', event => { if (event.target.id === 'accountEditModal') closeManageAccountEditor(); });
   qsa('.manage-nav-item').forEach((button) => button.addEventListener('click', () => activateSection(button.dataset.section)));
   qsa('[data-jump]').forEach((button) => button.addEventListener('click', () => activateSection(button.dataset.jump)));
   $('manageLoginForm').addEventListener('submit', async (event) => {

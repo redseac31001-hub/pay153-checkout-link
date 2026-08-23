@@ -45,6 +45,7 @@ const ACCOUNT_PAYMENT_METHOD_ALIASES = {
   pix: 'pix',
   upi: 'upi',
   hosted: 'hosted'
+  ,gcash: 'gcash'
 };
 const CHECKOUT_PROTOCOL_TTL_MS = 24 * 60 * 60 * 1000;
 const CHECKOUT_PROTOCOLS = new Set(['oaics', 'cs', 'unknown']);
@@ -1329,6 +1330,8 @@ function restoreAccountStatus(target, source){
   target.promoStatus = ['supported', 'unsupported', 'unknown'].includes(source?.promoStatus)
     ? source.promoStatus : (target.promoStatus || 'unknown');
   target.promoReason = String(source?.promoReason || target.promoReason || '').slice(0, 240);
+  target.note = String(source?.note || target.note || '').slice(0, 500);
+  target.discounts = source?.discounts && typeof source.discounts === 'object' ? source.discounts : (target.discounts || {global: {percent: 0, fixed: 0}, regions: []});
   target.paymentMethods = normalizeAccountPaymentMethods(source?.paymentMethods || target.paymentMethods);
   target.checkoutProtocols = normalizeAccountCheckoutProtocols(source?.checkoutProtocols || target.checkoutProtocols);
   target.riskStatus = ['clear', 'rejected', 'cooldown', 'blocked', 'frozen', 'unknown'].includes(source?.riskStatus)
@@ -1396,6 +1399,8 @@ function persistAccounts(){
       frozenAt: Number(entry.frozenAt || 0),
       promoStatus: entry.promoStatus || 'unknown',
       promoReason: String(entry.promoReason || '').slice(0, 240),
+      note: String(entry.note || '').slice(0, 500),
+      discounts: entry.discounts || {global: {percent: 0, fixed: 0}, regions: []},
       paymentMethods: normalizeAccountPaymentMethods(entry.paymentMethods),
       checkoutProtocols: normalizeAccountCheckoutProtocols(entry.checkoutProtocols),
       lifecycle: normalizeAccountLifecycle(entry.lifecycle),

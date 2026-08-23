@@ -1955,9 +1955,6 @@ class JobStore:
                 self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
                 entry_geo = proxy_geo_cached(entry_proxy)
                 main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
-                exit_proxy, payment_geo, rejected_countries = select_paypal_exit_proxy(
-                    exit_proxy,
-                    exit_pool,
                 self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
                 entry_geo = proxy_geo_cached(entry_proxy)
                 main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")

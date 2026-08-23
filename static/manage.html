@@ -159,6 +159,21 @@
             </div>
           </section>
 
+          <div id="accountEditModal" class="account-edit-modal" hidden>
+            <div class="account-edit-dialog panel" role="dialog" aria-modal="true" aria-labelledby="accountEditTitle">
+              <div class="editor-header"><div><span class="section-index">A</span><div><h3 id="accountEditTitle">编辑账号</h3><p>备注、优惠和支付方式只保存到当前浏览器账号库。</p></div></div><button id="accountEditClose" class="text-button" type="button">关闭</button></div>
+              <input id="accountEditId" type="hidden">
+              <label class="field"><span>账号备注</span><textarea id="accountEditNote" maxlength="500" placeholder="例如：菲律宾主账号、优先使用 GCash"></textarea></label>
+              <div class="account-edit-subheading">全局优惠</div>
+              <div class="form-grid form-grid-2"><label class="field"><span>折扣百分比 (%)</span><input id="accountDiscountPercent" type="number" min="0" max="100" step="0.01" placeholder="0"></label><label class="field"><span>固定优惠金额</span><input id="accountDiscountFixed" type="number" min="0" step="0.01" placeholder="0"></label></div>
+              <div class="account-edit-subheading">地区优惠覆盖 <small>每行：国家,货币,百分比,固定金额，例如 PH,PHP,10,0</small></div>
+              <textarea id="accountDiscountRegions" class="account-region-textarea" placeholder="PH,PHP,10,0&#10;DE,EUR,0,2"></textarea>
+              <div class="account-edit-subheading">支付方式</div>
+              <div class="account-method-editor"><label><input type="checkbox" data-account-method="paypal"> PayPal</label><label><input type="checkbox" data-account-method="gcash"> GCash</label><label><input type="checkbox" data-account-method="gopay"> Gopay</label><label><input type="checkbox" data-account-method="ideal"> iDEAL</label><label><input type="checkbox" data-account-method="upi"> UPI</label><label><input type="checkbox" data-account-method="pix"> PIX</label><label><input type="checkbox" data-account-method="card"> Card</label></div>
+              <div class="editor-actions"><span class="form-status">支持全局配置，也支持按地区覆盖。</span><button id="accountEditSave" class="primary-button" type="button"><span>保存账号设置</span><i>→</i></button></div>
+            </div>
+          </div>
+
           <section class="manage-section" data-panel="proxies" hidden>
             <div class="section-heading"><div><div class="eyebrow"><span>03</span> PROXY POOLS</div><h2>代理池配置。</h2><p>按支付方式、国家和用途记录入口与支付出口；实际任务仍由工作台提交。</p></div><span class="section-status">CREDENTIALS SEALED</span></div>
             <form id="proxyForm" class="panel editor-card">
