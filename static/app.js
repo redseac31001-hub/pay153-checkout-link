@@ -40,6 +40,7 @@ const ACCOUNT_BLOCK_FUSE_ERROR_CODE = 'account_blocked_fuse';
 const ACCOUNT_PAYMENT_METHOD_ALIASES = {
   card: 'card',
   gopay: 'gopay',
+  gcash: 'gcash',
   ideal: 'ideal',
   paypal: 'paypal',
   pix: 'pix',
@@ -104,7 +105,7 @@ const DEFAULT_PROXY_ASN_RECOMMENDATIONS = {
 };
 
 const proxyProfileNames = {
-  hosted: 'Hosted', paypal: 'PayPal', ideal: 'iDEAL', upi: 'UPI', pix: 'PIX', gopay: 'Gopay'
+  hosted: 'Hosted', paypal: 'PayPal', ideal: 'iDEAL', upi: 'UPI', pix: 'PIX', gopay: 'Gopay', gcash: 'GCash'
 };
 const proxyProfileRails = Object.keys(proxyProfileNames);
 let activeProxyRail = '';
@@ -128,16 +129,17 @@ let paypalBillingRevision = 0;
 const providerDefaults = {
   hosted: {country: 'US', currency: 'USD'}, paypal: {country: 'US', currency: 'USD'},
   ideal: {country: 'NL', currency: 'EUR'}, upi: {country: 'IN', currency: 'INR'},
-  pix: {country: 'BR', currency: 'BRL'}, gopay: {country: 'ID', currency: 'IDR'}
+  pix: {country: 'BR', currency: 'BRL'}, gopay: {country: 'ID', currency: 'IDR'}, gcash: {country: 'PH', currency: 'PHP'}
 };
-const countryCurrency = {US:'USD',DE:'EUR',FR:'EUR',NL:'EUR',IN:'INR',BR:'BRL',GB:'GBP',JP:'JPY',AU:'AUD',CA:'CAD',ID:'IDR'};
+const countryCurrency = {US:'USD',DE:'EUR',FR:'EUR',NL:'EUR',IN:'INR',BR:'BRL',GB:'GBP',JP:'JPY',AU:'AUD',CA:'CAD',ID:'IDR',PH:'PHP'};
 const railDisplayDetails = {
   hosted: {icon: '↗', title: 'Hosted', description: '官方 Checkout 托管，返回支付长链。', method: 'Checkout 长链'},
   paypal: {icon: 'P', title: 'PayPal', description: '生成 PayPal Approve 跳转，完成账单授权。', method: 'PayPal 跳转'},
   ideal: {icon: 'iD', title: 'iDEAL', description: '使用荷兰 iDEAL 银行授权完成支付。', method: '银行授权'},
   upi: {icon: '₹', title: 'UPI', description: '生成印度 UPI 支付二维码。', method: 'UPI 二维码'},
   pix: {icon: '◇', title: 'PIX', description: '生成巴西 PIX 即时支付二维码。', method: 'PIX 二维码'},
-  gopay: {icon: 'G', title: 'Gopay', description: '使用印尼 Gopay 电子钱包完成支付。', method: 'Gopay 钱包'}
+  gopay: {icon: 'G', title: 'Gopay', description: '使用印尼 Gopay 电子钱包完成支付。', method: 'Gopay 钱包'},
+  gcash: {icon: '₱', title: 'GCash', description: '使用菲律宾 GCash 手机授权完成支付。', method: 'GCash 授权'}
 };
 
 function proxyLines(node){
@@ -921,7 +923,7 @@ function readPaypalBillingSelection(){
 }
 
 const planDisplayNames = {plus:'Plus', pro:'Pro', team:'Team', codex_low:'Codex'};
-const railDisplayNames = {hosted:'Hosted', paypal:'PayPal', ideal:'iDEAL', upi:'UPI', pix:'PIX', gopay:'Gopay'};
+const railDisplayNames = {hosted:'Hosted', paypal:'PayPal', ideal:'iDEAL', upi:'UPI', pix:'PIX', gopay:'Gopay', gcash:'GCash'};
 const COLLAPSIBLE_STORAGE_KEY = 'pay153.collapsible_sections.v1';
 
 function updateRailDetails(){
@@ -987,7 +989,7 @@ function syncFields(applyRailDefault=false){
   const promoSupported = plan === 'plus';
   $('promoLine').style.display = promoSupported ? 'flex' : 'none';
   $('plusPromoFields').hidden = !promoSupported || !$('usePromo').checked;
-  const needsExit = rail !== 'hosted' && rail !== 'pix';
+  const needsExit = rail !== 'hosted' && rail !== 'pix' && rail !== 'gcash';
   $('proxyGrid').classList.toggle('single', !needsExit);
   $('exitProxyField').hidden = !needsExit;
   $('exitProxy').required = needsExit;
@@ -998,9 +1000,10 @@ function syncFields(applyRailDefault=false){
     ideal: '推荐代理：两个代理池均使用 NL。',
     upi: '推荐代理：代理池 1 使用可获得优惠资格的国家或地区（如 TR、JP、BR），代理池 2 使用 IN 创建并处理 UPI。',
     pix: '推荐代理：代理池 1 使用 BR。',
-    gopay: '推荐代理：代理池 1 使用 TH（泰国）更新优惠，代理池 2 使用 ID（印尼）创建并处理 Gopay。'
+    gopay: '推荐代理：代理池 1 使用 TH（泰国）更新优惠，代理池 2 使用 ID（印尼）创建并处理 Gopay。',
+    gcash: '仅使用 PH 菲律宾代理池；账单地址自动取内置菲律宾地址。'
   };
-  const pool2Hints = {paypal:'巴西 PayPal 推荐 BR',ideal:'推荐 NL',upi:'推荐 IN',gopay:'推荐 ID'};
+  const pool2Hints = {paypal:'巴西 PayPal 推荐 BR',ideal:'推荐 NL',upi:'推荐 IN',gopay:'推荐 ID',gcash:'仅需 PH 代理池 1'};
   const recommendation = recommendations[rail] || '推荐代理：使用与所选地区一致的代理。';
   $('proxyRecommendation').textContent = recommendation;
   $('proxyFootHint').textContent = recommendation;

@@ -23,9 +23,31 @@ import random
 import time
 import math
 import asyncio
+import os
+import shutil
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 from curl_cffi import requests
+
+
+def _node_binary() -> str:
+    """Resolve Node even when the service is launched without the shell PATH."""
+    configured = str(os.getenv("PAY153_NODE_BIN") or "").strip()
+    candidates = [configured, shutil.which("node")]
+    home = os.path.expanduser("~")
+    candidates.extend([
+        os.path.join(home, ".nvm", "versions", "node", "v22.22.3", "bin", "node"),
+        os.path.join(home, ".nvm", "versions", "node", "v22.20.0", "bin", "node"),
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+    ])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError(
+        "找不到 Node.js。请安装 Node，或设置 PAY153_NODE_BIN=/absolute/path/to/node"
+    )
 
 
 # ============================================================
@@ -613,7 +635,7 @@ def _run_vm_bundle_via_node(chat_req: dict, xor_key: str, flow: str = "oauth_cre
             json.dump(input_data, f)
 
         result = subprocess.run(
-            ["node", gen_script, input_file],
+            [_node_binary(), gen_script, input_file],
             capture_output=True,
             text=True,
             timeout=30,

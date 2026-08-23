@@ -32,6 +32,7 @@ from provider_checkout import (
     stripe_to_provider,
 )
 from oaics_api import oaics_context_headers, run_oaics_paypal_api_confirmation
+from oaics_gcash import run_gcash_flow
 from sentinel_token import SentinelTokenProvider as BaseSentinel
 
 # 加载 .env 文件中的环境变量
@@ -108,6 +109,7 @@ CHECKOUT_PROTOCOL_HINT_TTL_SECONDS = max(
 )
 
 CHECKOUT_SESSION_CONTRACT_ERROR_CODE = "checkout_session_contract_changed"
+CHECKOUT_RATE_LIMITED_ERROR_CODE = "checkout_creation_rate_limited"
 OAICS_CONVERSION_FAILED_ERROR_CODE = "oaics_conversion_failed_retry"
 OAICS_BA_CONFIRM_FAILED_ERROR_CODE = "oaics_ba_confirm_retry"
 PAYPAL_GENERIC_DECLINE_FUSE_ERROR_CODE = "paypal_generic_decline_fuse"
@@ -945,7 +947,7 @@ def checkout_payload(options: dict, meta: dict) -> dict[str, Any]:
             "auto_top_up_enabled": True,
         }
     elif plan == "plus" and options.get("use_promo") and (
-        link_type not in {"pix", "paypal", "upi", "ideal", "gopay"}
+        link_type not in {"pix", "paypal", "upi", "ideal", "gopay", "gcash"}
         or (
             options.get("promo_on_create")
             and (
@@ -1779,6 +1781,46 @@ class JobStore:
             lowered = last_error.lower()
             error_code = str(state.get("error_code") or "")
 
+            # Checkout creation rate limits are account/session-side in
+            # addition to any proxy/IP limit.  Creating another checkout with
+            # a new proxy immediately only extends the cooldown and can make
+            # the account look more abusive.  Stop this task and let the user
+            # retry after the upstream cooldown instead of burning all tries.
+            if (
+                "checkout_creation_rate_limited" in lowered
+                or "too many checkout attempts" in lowered
+            ):
+                cooldown_msg = (
+                    "OpenAI Checkout 创建被限流，已停止继续换代理重试；"
+                    "这是账号/会话或出口组合的频率限制，不是单条代理故障。"
+                    "请等待冷却后再试，避免连续创建新 Checkout。"
+                )
+                self.log(job_id, cooldown_msg)
+                self.update(
+                    job_id,
+                    status="error",
+                    percent=100,
+                    text="Checkout 创建被限流，已停止重试",
+                    error=cooldown_msg,
+                    error_code=CHECKOUT_RATE_LIMITED_ERROR_CODE,
+                )
+                return
+
+            if "gcash checkout/confirm 被拒绝" in lowered:
+                reject_msg = (
+                    "GCash checkout/confirm 被拒绝，已停止立即换代理创建新 Checkout；"
+                    "请检查税费/账单步骤及账号状态后再试。"
+                )
+                self.update(
+                    job_id,
+                    status="error",
+                    percent=100,
+                    text="GCash confirm 被拒绝，已停止重试",
+                    error=reject_msg,
+                    error_code="gcash_confirm_rejected",
+                )
+                return
+
             # OAICS 原生确认/旧转换失败都不计入普通 retry_count，先按
             # OAICS 专用计数器换代理并创建全新 Checkout。
             if error_code in {
@@ -1913,6 +1955,8 @@ class JobStore:
                     self.log(job_id, f"入口代理地区记录失败：{type(exc).__name__}")
             elif provider == "pix":
                 self.log(job_id, f"代理池 1 共 {len(entry_pool)} 条，本次已自动选择 1 条")
+            elif provider == "gcash":
+                self.log(job_id, f"GCash 仅使用 PH 代理池，共 {len(entry_pool)} 条，本次已自动选择 1 条")
             elif provider == "gopay":
                 self.log(
                     job_id,
@@ -1949,7 +1993,37 @@ class JobStore:
                     )
                 self.ensure_not_cancelled(job_id)
 
+            if provider == "gcash":
+                self.update(job_id, percent=9, text="第 1/7 步：校验菲律宾 PH 代理与账单地址")
+                entry_geo = proxy_geo_cached(entry_proxy)
+                main_country, main_region = entry_geo.get("country", ""), entry_geo.get("region", "")
+                if main_country != "PH":
+                    raise RuntimeError(f"GCash 需要 PH 菲律宾代理，当前为 {main_country or '未知'}")
+                from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
+                addresses = list(_BUILTIN_PUBLIC_ADDRESSES.get("PH", []))
+                if not addresses:
+                    raise RuntimeError("内置地址库没有可用的 PH 菲律宾账单地址")
+                selected_address = dict(secrets.choice(addresses))
+                billing_profile = {
+                    "country": "PH", "name": selected_address.get("name") or "PAY Customer",
+                    "email": meta.get("email") or "", "line1": selected_address.get("line1") or "",
+                    "line2": selected_address.get("line2") or "", "city": selected_address.get("city") or "",
+                    "state": selected_address.get("state") or "", "postal_code": selected_address.get("postal_code") or "",
+                }
+                options["billing_profile"] = billing_profile
+                options["country"], options["currency"] = "PH", "PHP"
+                options["checkout_country"], options["checkout_currency"] = "PH", "PHP"
+                self.log(job_id, f"GCash 账单地址使用内置 PH 地址：{billing_profile.get('city') or '-'}")
+                self.ensure_not_cancelled(job_id)
+
             promo_requested = options["plan"] == "plus" and options.get("use_promo", False)
+            if provider == "gcash":
+                # Keep this invariant local to the worker as well as in the
+                # HTTP validator: queued jobs may contain older option data.
+                promo_requested = True
+                options["use_promo"] = True
+                options["promo_campaign"] = "plus-1-month-free"
+                self.log(job_id, "[gcash] 强制启用 Plus 首月优惠，目标金额=0")
             oaics_hint_active = False
             if provider == "paypal":
                 self.update(job_id, percent=9, text="第 1/7 步：校验 PayPal 优惠识别代理与支付代理")
@@ -2150,9 +2224,10 @@ class JobStore:
                 (f"第 2/7 步：使用代理池 2（{payment_country}）创建 {country}/{options['currency']} PayPal Checkout"
                  + ("（原生携带优惠）" if options.get("promo_on_create") else "（稍后更新优惠）"))
                 if provider == "paypal" and promo_requested else (
+                    "第 2/7 步：使用 PH 代理创建 GCash Checkout" if provider == "gcash" else (
                     "第 2/7 步：使用 IN 代理创建 UPI Checkout" if provider == "upi" else (
                         "第 2/7 步：使用印尼 IP 创建 Gopay Checkout（稍后通过代理池 1 更新优惠）" if provider == "gopay" else "创建 OpenAI Checkout"
-                    )
+                    ))
                 )
             )
             self.update(job_id, percent=34, text=stage2_text)
@@ -2282,6 +2357,8 @@ class JobStore:
                 else:
                     self.log(job_id, "iDEAL 优惠更新使用代理池 1，NL/EUR Checkout 与 Stripe 使用代理池 2")
             session_id = checkout_data.get("checkout_session_id") or ""
+            if provider == "gcash" and not is_openai_checkout_session_id(session_id):
+                raise RuntimeError("GCash 需要 OpenAI OAICS Checkout（oaics_*），当前 Checkout 未返回原生会话")
             has_oaics_session = bool(
                 is_openai_checkout_session_id(session_id)
                 or is_openai_checkout_session_id(checkout_data.get("openai_checkout_session_id"))
@@ -2400,6 +2477,41 @@ class JobStore:
                     oaics_payment_methods,
                 )
                 materialized: dict[str, Any] = {}
+                if provider == "gcash":
+                    managed_url = openai_managed_checkout_url(
+                        checkout_data, openai_session_id, processor_entity
+                    )
+                    if not managed_url:
+                        raise checkout_session_contract_error(checkout_data, "OpenAI managed GCash Checkout")
+                    from billing_address_resolver import _BUILTIN_PUBLIC_ADDRESSES
+                    ph_addresses = list(_BUILTIN_PUBLIC_ADDRESSES.get("PH", []))
+                    if not ph_addresses:
+                        raise RuntimeError("内置地址库没有 PH 菲律宾地址")
+                    address = dict(secrets.choice(ph_addresses))
+                    gcash_billing = {
+                        "country": "PH", "currency": "PHP",
+                        "name": address.get("name") or "PAY Customer",
+                        "email": meta.get("email") or "",
+                        "address": {key: address.get(key) or "" for key in ("line1", "line2", "city", "state", "postal_code")},
+                    }
+                    self.log(job_id, "GCash 使用 PH 代理与内置菲律宾账单地址，开始 OAICS 原生授权链")
+                    gcash_headers = asyncio.run(sentinel_headers(entry_proxy, "checkout_session_approval", device_id, did))
+                    gcash_result = run_gcash_flow(
+                        http=chatgpt_http, token=token, checkout_data=checkout_data,
+                        session_id=openai_session_id, checkout_url=managed_url,
+                        processor_entity=processor_entity, billing=gcash_billing,
+                        device_id=device_id, oai_session_id=oai_session_id,
+                        sentinel_headers=gcash_headers, log=lambda message: self.log(job_id, message),
+                    )
+                    options["_gcash_result"] = gcash_result
+                    options["_oaics_ba_handled"] = True
+                    options["gcash_handled"] = True
+                    session_id = openai_session_id
+                    checkout_data["checkout_session_id"] = session_id
+                    checkout_data["openai_checkout_session_id"] = session_id
+                    checkout_data["checkout_url"] = managed_url
+                    checkout_data["processor_entity"] = processor_entity
+                    options["openai_managed_checkout"] = False
                 # OAICS 的 PayPal 路径直接使用官方页面的
                 # confirmation_tokens -> checkout/confirm 协议。这里不再把
                 # oaics_* 强行转换为 cs_*，也不调用 Stripe payment_page。
@@ -3054,7 +3166,22 @@ class JobStore:
                 return response
 
             self.update(job_id, percent=62, text="正在生成支付结果")
-            provider_result = stripe_to_provider(
+            if provider == "gcash" and options.get("gcash_handled"):
+                provider_result = dict(options.get("_gcash_result") or {})
+                provider_result.update({
+                    "provider": "gcash",
+                    "link_type": "gcash",
+                    "checkout_session_id": session_id,
+                    "checkout_url": checkout_data.get("checkout_url") or "",
+                    "payment_proxy_country": "PH",
+                    "checkout_country": "PH",
+                    "checkout_currency": "PHP",
+                    "currency": "PHP",
+                    "promo_requested": promo_requested,
+                    "promo_applied": True if promo_requested else None,
+                })
+            else:
+                provider_result = stripe_to_provider(
                 stripe_http,
                 session_id,
                 provider,
@@ -3082,7 +3209,7 @@ class JobStore:
                 require_zero_due=promo_requested,
                 local_method_strategy=options.get("local_method_strategy") or "standalone",
                 log=provider_log,
-            )
+                )
             self.ensure_not_cancelled(job_id)
             self.update(job_id, percent=98, text="结果已生成，正在整理页面")
             result.update(provider_result)
@@ -3094,7 +3221,9 @@ class JobStore:
                 result["checkout_currency"] = result["currency"]
             done_text = "第 7/7 步：PIX 二维码生成完成" if provider == "pix" else (
                 "第 7/7 步：PayPal agreements/approve 链接生成完成" if provider == "paypal" else (
-                    "第 7/7 步：Gopay 支付链接生成完成" if provider == "gopay" else f"{provider.upper()} 提取完成"
+                    "第 7/7 步：Gopay 支付链接生成完成" if provider == "gopay" else (
+                        "第 7/7 步：GCash 授权完成" if provider == "gcash" else f"{provider.upper()} 提取完成"
+                    )
                 )
             )
 
@@ -3661,13 +3790,13 @@ def health():
 def config():
     return jsonify({
         "plans": list(PLANS),
-        "link_types": ["hosted", "paypal", "ideal", "upi", "pix", "gopay"],
+        "link_types": ["hosted", "paypal", "ideal", "upi", "pix", "gopay", "gcash"],
         "country_currency": COUNTRY_CURRENCY,
         "provider_defaults": PROVIDER_DEFAULTS,
         "proxy_policy": {
             "entry_required": True,
-            "exit_required_for": ["paypal", "ideal", "upi"],
-            "single_chain_for": ["pix"],
+            "exit_required_for": ["paypal", "ideal", "upi", "gopay"],
+            "single_chain_for": ["pix", "gcash"],
             "max_per_pool": 500,
             "selection": "random_per_job",
         },
@@ -3742,7 +3871,7 @@ def start_checkout():
     link_type = str(data.get("link_type") or "hosted").lower()
     if plan not in PLANS:
         return jsonify({"error": "计划类型不正确"}), 400
-    if link_type not in {"hosted", "paypal", "ideal", "upi", "pix", "gopay"}:
+    if link_type not in {"hosted", "paypal", "ideal", "upi", "pix", "gopay", "gcash"}:
         return jsonify({"error": "提取方式不正确"}), 400
     if detection_only and link_type != "paypal":
         return jsonify({"error": "协议检测仅支持 PayPal"}), 400
@@ -3760,16 +3889,16 @@ def start_checkout():
         exit_raw = data.get("exit_proxy") or data.get("payment_proxy") or ""
     if not entry_raw:
         return jsonify({"error": "请填写 Checkout 入口代理"}), 400
-    if link_type not in {"hosted", "pix"} and not exit_raw:
+    if link_type not in {"hosted", "pix", "gcash"} and not exit_raw:
         return jsonify({"error": "当前支付路径需要填写支付出口代理"}), 400
     try:
         entry_proxies = normalize_proxy_pool(entry_raw, "入口代理")
-        exit_proxies = normalize_proxy_pool(exit_raw, "出口代理") if exit_raw and link_type != "pix" else []
+        exit_proxies = normalize_proxy_pool(exit_raw, "出口代理") if exit_raw and link_type not in {"pix", "gcash"} else []
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     if not entry_proxies:
         return jsonify({"error": "入口代理至少填写 1 条"}), 400
-    if link_type not in {"hosted", "pix"} and not exit_proxies:
+    if link_type not in {"hosted", "pix", "gcash"} and not exit_proxies:
         return jsonify({"error": "出口代理至少填写 1 条"}), 400
     raw_pix_tax_id = re.sub(r"\D", "", str(data.get("pix_tax_id") or ""))[:14] if link_type == "pix" else ""
     try:
@@ -3795,6 +3924,16 @@ def start_checkout():
         pix_identity.update({key: value for key, value in manual_identity.items() if value})
     if link_type == "gopay" and country != "ID":
         return jsonify({"error": "Gopay Checkout 国家必须为 ID/印尼"}), 400
+    if link_type == "gcash":
+        if plan != "plus":
+            return jsonify({"error": "GCash 当前仅支持 Plus 首月优惠归零流程"}), 400
+        # GCash is only implemented for the zero-due Plus trial flow.  Do not
+        # let a stale/unchecked frontend checkbox silently disable the promo;
+        # the backend must remain authoritative for this payment rail.
+        data["use_promo"] = True
+        data["promo_campaign"] = str(data.get("promo_campaign") or "plus-1-month-free")
+        country, currency = "PH", "PHP"
+        data["country"], data["currency"] = country, currency
 
     paypal_billing_profile: dict[str, str] = {}
     paypal_billing_selection: dict[str, Any] = {}
@@ -3834,9 +3973,9 @@ def start_checkout():
         "checkout_country": country,
         "checkout_currency": currency,
         "entry_proxies": entry_proxies,
-        "exit_proxies": entry_proxies if link_type == "pix" else exit_proxies,
-        "use_promo": False if detection_only else (bool(data.get("use_promo", True)) if plan == "plus" else False),
-        "promo_campaign": "" if detection_only else (str(data.get("promo_campaign") or "") if plan == "plus" else ""),
+        "exit_proxies": entry_proxies if link_type in {"pix", "gcash"} else exit_proxies,
+        "use_promo": False if detection_only else (True if link_type == "gcash" else (bool(data.get("use_promo", True)) if plan == "plus" else False)),
+        "promo_campaign": "" if detection_only else ("plus-1-month-free" if link_type == "gcash" else (str(data.get("promo_campaign") or "") if plan == "plus" else "")),
         "promo_code": str(data.get("promo_code") or "") if plan == "team" else "",
         "workspace_name": str(data.get("workspace_name") or "")[:80],
         "workspace_id": str(data.get("workspace_id") or "")[:120],

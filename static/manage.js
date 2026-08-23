@@ -123,6 +123,7 @@ const ACCOUNT_METHOD_LABELS = {
   pix: 'PIX',
   upi: 'UPI',
   hosted: 'Hosted'
+  ,gcash: 'GCash'
 };
 
 function maskLocalAccount(value) {

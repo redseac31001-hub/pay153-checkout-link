@@ -21,6 +21,7 @@ PROVIDER_DEFAULTS = {
     "upi": {"country": "IN", "currency": "INR"},
     "pix": {"country": "BR", "currency": "BRL"},
     "gopay": {"country": "ID", "currency": "IDR"},
+    "gcash": {"country": "PH", "currency": "PHP"},
 }
 
 # PIX Automático / UPI AutoPay mandate_options were added after the Checkout
